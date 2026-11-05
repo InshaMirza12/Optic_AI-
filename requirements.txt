@@ -1,0 +1,9 @@
+# Optic-AI Unified Backend Dependencies
+fastapi>=0.115.0
+uvicorn>=0.30.0
+python-dotenv>=1.0.1
+python-multipart>=0.0.9
+google-genai>=2.0.0
+edge-tts>=7.0.0
+pypdf>=5.0.0
+gtts>=2.5.0

@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Python virtual environment & cache
+myenv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment & secrets (Keep API keys private)
+.env
+.env.local
+.env.*.local
+
+# Expo & Metro caches
+.expo/
+dist/
+web-build/
+
+# Generated static files (Keep static directory structure but ignore generated audio/text)
+static/*.mp3
+static/*.txt
+static/document_cache.json
+static/last_document.json
+!static/.gitkeep
+
+# System & Editor files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/
