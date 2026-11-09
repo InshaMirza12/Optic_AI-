@@ -179,6 +179,38 @@ def parse_page_number_from_text(text: str) -> Optional[int]:
     return None
 
 
+def extract_file_search_intent(text: str) -> Tuple[str, Optional[str]]:
+    """
+    Extracts the file search keyword and folder preference from spoken user statements.
+    Examples:
+      'take the document named as cryptography from my downloads folder' -> ('cryptography', 'Downloads')
+      'take cryptography from downloads' -> ('cryptography', 'Downloads')
+      'load unit 4 from documents' -> ('unit 4', 'Documents')
+    """
+    text_lower = text.lower().strip()
+    folder_pref = None
+    if "download" in text_lower:
+        folder_pref = "Downloads"
+    elif "document" in text_lower and ("folder" in text_lower or "directory" in text_lower or "my document" in text_lower):
+        folder_pref = "Documents"
+    elif "desktop" in text_lower:
+        folder_pref = "Desktop"
+
+    # Pattern: 'named as <name>', 'named <name>', 'called <name>', 'title <name>'
+    m = re.search(r"(?:named\s+as|named|called|title)\s+([a-zA-Z0-9_\-\s]+?)(?:\s+from|\s+in|\s+folder|\.pdf|$)", text_lower)
+    if m:
+        kw = m.group(1).strip()
+    else:
+        cleaned = re.sub(
+            r"\b(take|the|document|file|pdf|from|my|downloads?|documents?|desktop|folder|directory|named|as|called|upload|fetch|load|open|get|please|saved|in)\b",
+            " ",
+            text_lower,
+        )
+        kw = " ".join(cleaned.split()).strip()
+
+    return kw, folder_pref
+
+
 def search_and_load_local_file(query: str) -> Dict[str, Any]:
     """Searches user filesystem for a PDF matching query keywords and loads it into memory."""
     query = str(query).strip().strip('"').strip("'")
@@ -191,19 +223,45 @@ def search_and_load_local_file(query: str) -> Dict[str, Any]:
     if os.path.isfile(query):
         matched_file_path = os.path.abspath(query)
     else:
+        kw, folder_pref = extract_file_search_intent(query)
+        effective_query = kw if kw else query.lower()
         raw_lower = query.lower()
-        prefer_downloads = "download" in raw_lower
-        prefer_documents = "document" in raw_lower or "doc" in raw_lower
+
+        prefer_downloads = folder_pref == "Downloads" or "download" in raw_lower
+        prefer_documents = folder_pref == "Documents" or "document" in raw_lower or "doc" in raw_lower
         prefer_project = "project" in raw_lower or "workspace" in raw_lower
+        prefer_desktop = folder_pref == "Desktop" or "desktop" in raw_lower
 
         noise_words = {
             "in", "the", "file", "pdf", "open", "fetch", "load", "from", "my",
             "please", "find", "upload", "location", "folder", "directory", "saved",
-            "named", "called", "it", "is", "where", "search", "get", "system"
+            "named", "called", "it", "is", "where", "search", "get", "system",
+            "take", "as", "bring", "select", "choose", "pick"
         }
-        tokens = [t for t in re.split(r"[\s,._\-/\\:]+", raw_lower) if t and t not in noise_words]
+        tokens = [t for t in re.split(r"[\s,._\-/\\:]+", effective_query.lower()) if t and t not in noise_words]
+        if not tokens:
+            tokens = [t for t in re.split(r"[\s,._\-/\\:]+", raw_lower) if t and t not in noise_words]
 
-        candidate_dirs = [
+        # Prioritize candidate directories based on spoken folder preference
+        candidate_dirs = []
+        if prefer_downloads:
+            candidate_dirs.extend([
+                r"C:\Users\LH\Downloads",
+                os.path.expanduser(r"~\Downloads"),
+            ])
+        elif prefer_documents:
+            candidate_dirs.extend([
+                r"C:\Users\LH\Documents",
+                os.path.expanduser(r"~\Documents"),
+            ])
+        elif prefer_desktop:
+            candidate_dirs.extend([
+                os.path.expanduser(r"~\Desktop"),
+                r"C:\Users\LH\Desktop",
+            ])
+
+        # Standard Windows & user directories
+        candidate_dirs.extend([
             r"C:\Users\LH\Downloads",
             r"C:\Users\LH\Documents",
             os.path.expanduser(r"~\Downloads"),
@@ -211,7 +269,7 @@ def search_and_load_local_file(query: str) -> Dict[str, Any]:
             os.path.expanduser(r"~\Desktop"),
             r"e:\final_year_project",
             os.path.dirname(os.path.abspath(__file__)),
-        ]
+        ])
 
         valid_dirs = []
         for d in candidate_dirs:
@@ -239,21 +297,26 @@ def search_and_load_local_file(query: str) -> Dict[str, Any]:
             fpath = pdf_path.lower()
             score = 0
 
-            if raw_lower.replace(".pdf", "") in fname:
+            # Substring match on extracted keyword
+            if effective_query and effective_query in fname:
+                score += 60
+            elif raw_lower.replace(".pdf", "") in fname:
                 score += 50
 
             matched_tokens = 0
             for t in tokens:
                 if t in fname:
-                    score += 10
+                    score += 15
                     matched_tokens += 1
                 elif t in fpath:
-                    score += 3
+                    score += 4
 
             if prefer_downloads and "download" in fpath:
-                score += 5
+                score += 10
             if prefer_documents and "document" in fpath:
-                score += 5
+                score += 10
+            if prefer_desktop and "desktop" in fpath:
+                score += 10
             if prefer_project and "final_year_project" in fpath:
                 score += 5
 
@@ -278,6 +341,13 @@ def search_and_load_local_file(query: str) -> Dict[str, Any]:
 
     structured = extract_structured_pdf_data(file_bytes)
     doc_name = os.path.basename(matched_file_path)
+    folder_display = "Downloads" if "download" in matched_file_path.lower() else ("Documents" if "document" in matched_file_path.lower() else "system")
+
+    spoken_confirmation = (
+        f"Successfully loaded {doc_name} from your {folder_display} folder. "
+        f"It contains {structured['page_count']} pages and {len(structured['paragraphs'])} paragraphs. "
+        f"What would you like to do? You can say: read my document, quick summary, detailed summary, exam notes, or ask any question."
+    )
 
     DOCUMENT_STORE["default"] = {
         "text": structured["full_text"],
@@ -288,21 +358,19 @@ def search_and_load_local_file(query: str) -> Dict[str, Any]:
         "paragraphs": structured["paragraphs"],
         "current_page": 1,
         "current_paragraph_index": 0,
-        "last_spoken_text": (
-            f"Successfully loaded {doc_name}. It contains {structured['page_count']} pages and "
-            f"{len(structured['paragraphs'])} paragraphs. Say read my document, quick summary, "
-            f"detailed summary, exam notes, or ask any question."
-        ),
+        "last_spoken_text": spoken_confirmation,
         "cache": {},
     }
     save_document_store()
 
     return {
         "document_name": doc_name,
+        "folder_name": folder_display,
         "file_path": matched_file_path,
         "char_count": len(structured["full_text"]),
         "page_count": structured["page_count"],
         "paragraphs_count": len(structured["paragraphs"]),
+        "spoken_text": spoken_confirmation,
         "preview": structured["full_text"][:200] + "...",
     }
 
@@ -978,16 +1046,22 @@ async def voice_orchestrator(request: Request):
         }
 
     # 10. Voice-based File Search & Ingestion
-    if any(k in cleaned_command for k in ["upload", "fetch file", "load file", "open file", "find file"]):
-        # Extract file keyword query
-        query = re.sub(r"\b(upload|fetch file|load file|open file|find file|pdf|document)\b", "", cleaned_command).strip()
-        if len(query) >= 3:
+    file_request_patterns = [
+        "upload", "fetch file", "load file", "open file", "find file",
+        "take document", "take the document", "take file", "take the file",
+        "take ", "named as", "from my download", "from download", "from my document",
+        "from document", "from desktop", "load ", "fetch ", "get document", "get file"
+    ]
+    if any(k in cleaned_command for k in file_request_patterns):
+        kw, folder_pref = extract_file_search_intent(cleaned_command)
+        query = kw if kw else cleaned_command
+        if len(query) >= 2 or folder_pref:
             try:
-                load_res = search_and_load_local_file(query)
-                success_text = (
-                    f"Successfully loaded {load_res['document_name']}. "
-                    f"It has {load_res['page_count']} pages. "
-                    f"How can I help you? You can say: read my document, quick summary, detailed summary, or exam notes."
+                load_res = search_and_load_local_file(cleaned_command)
+                success_text = load_res.get("spoken_text") or (
+                    f"Successfully loaded {load_res['document_name']} from your {load_res.get('folder_name', 'system')} folder. "
+                    f"It has {load_res['page_count']} pages and {load_res['paragraphs_count']} paragraphs. "
+                    f"What would you like to do? You can say: read my document, quick summary, detailed summary, exam notes, or ask any question."
                 )
                 file_id = str(uuid.uuid4())
                 audio_filename = f"{file_id}.mp3"
@@ -1007,7 +1081,7 @@ async def voice_orchestrator(request: Request):
                     "continue_listening": True,
                 }
             except Exception as e:
-                err_text = f"Could not find file matching {query}. Please state the file name or location."
+                err_text = f"Could not find a file matching {query}. Please state the file name or location."
                 return {
                     "status": "file_not_found",
                     "intent": "PROMPT_FILE",
@@ -1091,8 +1165,14 @@ async def voice_orchestrator(request: Request):
 
     try:
         crew = Crew(agents=[agent], tasks=[task], verbose=True)
-        crew_output = await asyncio.to_thread(crew.kickoff, inputs=inputs)
+        crew_output = await asyncio.wait_for(
+            asyncio.to_thread(crew.kickoff, inputs=inputs),
+            timeout=35.0
+        )
         result_text = crew_output.raw.strip()
+    except asyncio.TimeoutError:
+        print(f"[Optic-AI Agent Timeout] Kickoff exceeded 35s.")
+        result_text = "The analysis took longer than expected. Please ask for a quick summary or a more specific question."
     except Exception as e:
         print(f"[Agent Execution Error]: {e}")
         result_text = f"I encountered an error executing this request: {str(e)}"

@@ -127,6 +127,9 @@ const MainScreen = () => {
   const hasWelcomedRef = useRef<boolean>(false);
   const webRecognitionRef = useRef<any>(null);
   const restartTimerRef = useRef<any>(null);
+  const speechDebounceTimerRef = useRef<any>(null);
+  const speechAccumulatorRef = useRef<string>("");
+  const isProcessingCommandRef = useRef<boolean>(false);
 
   useEffect(() => {
     continuousListeningRef.current = continuousListening;
@@ -213,7 +216,7 @@ const MainScreen = () => {
       const welcomeTimer = setTimeout(async () => {
         await stopAllAudio();
         const welcome =
-          "Welcome to Optic AI. I am your hands-free voice assistant. You can say: Hey Optic, read my document, next paragraph, quick summary, detailed summary, exam notes, or ask any question. How can I help you today?";
+          "Welcome to Optic AI. I am your hands-free voice assistant. Tell me the document you want to upload, or you can say: read my document, next paragraph, quick summary, detailed summary, exam notes, or ask any question. How can I help you today?";
         setSummary(welcome);
         setLastSpokenResponse(welcome);
         await speakVoiceFeedback(welcome);
@@ -276,6 +279,9 @@ const MainScreen = () => {
     setAwaitingVoiceFilePath(false);
     setLoading(false);
     if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
+    if (speechDebounceTimerRef.current) clearTimeout(speechDebounceTimerRef.current);
+    speechAccumulatorRef.current = "";
+    isProcessingCommandRef.current = false;
 
     try {
       if (Platform.OS === "web" && webRecognitionRef.current) {
@@ -786,25 +792,31 @@ const MainScreen = () => {
       };
 
       recognition.onresult = (event: any) => {
-        const results = event.results;
-        if (!results || !results.length) return;
-        const transcript = results[results.length - 1]?.[0]?.transcript || "";
-        if (transcript.trim()) {
-          processCommand(transcript.trim());
+        let fullTranscript = "";
+        for (let i = 0; i < event.results.length; i++) {
+          fullTranscript += event.results[i][0].transcript + " ";
+        }
+        fullTranscript = fullTranscript.trim();
+        if (fullTranscript) {
+          handleIncomingSpeech(fullTranscript);
         }
       };
 
       recognition.onerror = (err: any) => {
         console.log("Web Speech error:", err?.error);
+        if (err?.error === "no-speech") {
+          // Normal silence, keep waiting for speech
+          return;
+        }
         setIsListening(false);
-        if (err?.error !== "aborted") {
+        if (err?.error !== "aborted" && !isProcessingCommandRef.current && !isSpeakingRef.current) {
           scheduleListeningResume();
         }
       };
 
       recognition.onend = () => {
         setIsListening(false);
-        if (continuousListeningRef.current && !isSpeakingRef.current && !activeSoundRef.current) {
+        if (continuousListeningRef.current && !isSpeakingRef.current && !activeSoundRef.current && !isProcessingCommandRef.current) {
           scheduleListeningResume();
         }
       };
@@ -817,8 +829,59 @@ const MainScreen = () => {
     }
   };
 
+  // Unified Speech Accumulator & Silence Debouncer:
+  // Allows user to finish their full statement/question comfortably without getting cut off!
+  const handleIncomingSpeech = (transcript: string) => {
+    if (isProcessingCommandRef.current || isSpeakingRef.current) return;
+
+    const trimmed = transcript.trim();
+    if (!trimmed) return;
+
+    const lower = trimmed.toLowerCase();
+
+    // Priority STOP commands execute immediately (0ms debounce)
+    if (
+      lower === "stop" ||
+      lower.startsWith("stop") ||
+      lower.includes("stop") ||
+      lower.includes("pause") ||
+      lower.includes("quiet") ||
+      lower.includes("shut up") ||
+      lower.includes("silence") ||
+      lower.includes("cancel") ||
+      lower.includes("halt")
+    ) {
+      if (speechDebounceTimerRef.current) clearTimeout(speechDebounceTimerRef.current);
+      speechAccumulatorRef.current = "";
+      handleStopAll();
+      return;
+    }
+
+    // Accumulate the spoken statement and display live transcription
+    speechAccumulatorRef.current = trimmed;
+    setRecognizedText(trimmed);
+
+    // Reset silence timer on every new speech chunk
+    if (speechDebounceTimerRef.current) {
+      clearTimeout(speechDebounceTimerRef.current);
+    }
+
+    // Natural conversation pause: waits 1.8 seconds of complete silence before executing
+    const SILENCE_TIMEOUT = 1800;
+    speechDebounceTimerRef.current = setTimeout(() => {
+      const fullUtterance = speechAccumulatorRef.current.trim();
+      speechAccumulatorRef.current = "";
+      if (fullUtterance && !isProcessingCommandRef.current && !isSpeakingRef.current) {
+        processCommand(fullUtterance);
+      }
+    }, SILENCE_TIMEOUT);
+  };
+
   // Central Voice Command Processor: Communicates with backend Voice Orchestrator
   const processCommand = async (command: string) => {
+    if (isProcessingCommandRef.current) return;
+    isProcessingCommandRef.current = true;
+
     const lower = command.toLowerCase().trim();
     setRecognizedText(command);
     console.log("[Optic-AI Voice Command]:", lower);
@@ -837,6 +900,7 @@ const MainScreen = () => {
       lower.includes("cancel") ||
       lower.includes("halt")
     ) {
+      isProcessingCommandRef.current = false;
       await handleStopAll();
       return;
     }
@@ -845,6 +909,7 @@ const MainScreen = () => {
     // 2. Awaiting file name/path from previous voice query
     // ============================================================
     if (awaitingVoiceFilePath) {
+      isProcessingCommandRef.current = false;
       await fetchLocalFile(command);
       return;
     }
@@ -856,16 +921,23 @@ const MainScreen = () => {
     setLoading(true);
     setLoadingMessage(`Optic AI processing: "${command}"...`);
 
+    // Strict 25s timeout safeguard prevents any hanging
+    const abortCtrl = new AbortController();
+    const timeoutId = setTimeout(() => abortCtrl.abort(), 25000);
+
     try {
       const cleanBase = serverUrl.trim().replace(/\/+$/, "");
       const resp = await fetch(`${cleanBase}/voice-orchestrator`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: abortCtrl.signal,
         body: JSON.stringify({
           speech_text: command,
           language: selectedLanguage,
         }),
       });
+
+      clearTimeout(timeoutId);
 
       if (!resp.ok) {
         throw new Error(`Voice orchestrator error: ${resp.status}`);
@@ -875,6 +947,7 @@ const MainScreen = () => {
       console.log("[Optic-AI Orchestrator Result]:", data);
 
       if (data.status === "ignored") {
+        isProcessingCommandRef.current = false;
         scheduleListeningResume();
         return;
       }
@@ -889,6 +962,7 @@ const MainScreen = () => {
       if (data.intent === "STOP_LISTENING") {
         setContinuousListening(false);
         continuousListeningRef.current = false;
+        isProcessingCommandRef.current = false;
         speakVoiceFeedback(data.spoken_text || "Listening stopped. Say Hey Optic to resume.");
         return;
       }
@@ -942,17 +1016,23 @@ const MainScreen = () => {
         speakVoiceFeedback(data.spoken_text || resultText);
       }
     } catch (err: any) {
+      clearTimeout(timeoutId);
       console.error("Orchestrator request failed:", err);
-      // Client-side fallback if server is unreachable
-      speakVoiceFeedback("Could not reach backend assistant. Checking connection.");
+      if (err.name === "AbortError") {
+        speakVoiceFeedback("The request took too long. Please ask again or try a shorter question.");
+      } else {
+        speakVoiceFeedback("Could not reach backend assistant. Checking connection.");
+      }
       scheduleListeningResume();
     } finally {
+      clearTimeout(timeoutId);
       setLoading(false);
+      isProcessingCommandRef.current = false;
     }
   };
 
   const startListening = async () => {
-    if (isSpeakingRef.current || activeSoundRef.current) {
+    if (isSpeakingRef.current || activeSoundRef.current || isProcessingCommandRef.current) {
       return;
     }
 
@@ -984,23 +1064,25 @@ const MainScreen = () => {
   };
 
   const stopListening = async () => {
+    if (speechDebounceTimerRef.current) clearTimeout(speechDebounceTimerRef.current);
+    speechAccumulatorRef.current = "";
+    isProcessingCommandRef.current = false;
     setContinuousListening(false);
     continuousListeningRef.current = false;
     await handleStopAll();
   };
 
-  // Native Speech Recognition Event Handlers
+  // Native Speech Recognition Event Handlers with full statement accumulation
   useSpeechRecognitionEvent("result", (event) => {
     const text = event.results[0]?.transcript || "";
-    if (!text.trim()) return;
-    setIsListening(false);
-    setRecognizedText(text.trim());
-    processCommand(text.trim());
+    if (text.trim()) {
+      handleIncomingSpeech(text.trim());
+    }
   });
 
   useSpeechRecognitionEvent("end", () => {
     setIsListening(false);
-    if (continuousListeningRef.current && !isSpeakingRef.current && !activeSoundRef.current) {
+    if (continuousListeningRef.current && !isSpeakingRef.current && !activeSoundRef.current && !isProcessingCommandRef.current) {
       scheduleListeningResume();
     }
   });

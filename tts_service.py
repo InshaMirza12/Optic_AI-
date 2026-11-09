@@ -153,9 +153,12 @@ async def generate_edge_tts_audio(
                 rate=rate,
                 pitch=pitch
             )
-            await communicate.save(output_path)
+            # Timeout safeguard (12s max) prevents WebSocket connection hangs
+            await asyncio.wait_for(communicate.save(output_path), timeout=12.0)
             if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                 return True
+    except asyncio.TimeoutError:
+        print(f"[TTS Timeout] Edge-TTS took over 12s, switching to fallback.")
     except Exception as e:
         print(f"[TTS Error] Edge-TTS failed: {e}. Falling back to gTTS if available.")
         
