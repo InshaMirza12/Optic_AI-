@@ -1,37 +1,45 @@
-# Optic-AI: Assistive Gen-AI Document Assistant for Visually Impaired Students
+# Optic-AI: Voice-Based AI Assistant for Blind & Visually Impaired Users
 
-**Optic-AI** is an accessible, agentic AI mobile and backend platform designed specifically to empower visually impaired students. It transforms lengthy educational materials into concise, detailed, or exam-oriented summaries and provides grounded document question-answering with natural **Microsoft Edge Neural Text-to-Speech (Edge-TTS)** and **complete voice-controlled JAWS/screen reader navigation**.
+**Optic-AI** is a 100% voice-based, hands-free assistive AI platform designed specifically to empower blind and visually impaired students. It transforms study materials into concise, detailed, or exam-oriented audio notes, provides page-by-page and paragraph-level document reading, and answers questions grounded strictly in educational content using **Microsoft Edge Neural Text-to-Speech (Edge-TTS)** and **CrewAI Multi-Agent Intelligence**.
 
 ---
 
 ## 🌟 Key Features
 
-### 1. Multilingual Voice-to-Text & Edge-TTS Neural Audio
-- **Microsoft Edge Neural TTS**: Generates lifelike speech across over 40 languages and regional dialects:
-  - English: `en-US-ChristopherNeural` / `en-IN-PrabhatNeural`
-  - Hindi: `hi-IN-SwaraNeural`
-  - Spanish: `es-ES-AlvaroNeural`
-  - French: `fr-FR-HenriNeural`
-  - German: `de-DE-ConradNeural`
-  - Regional: Bengali, Tamil, Telugu, Marathi, and more.
-- **Multilingual Voice Recognition**: Voice input adapts dynamically to English, Hindi, Spanish, French, and German using `expo-speech-recognition`.
+### 1. 100% Hands-Free Voice Control & Wake Word
+- **Continuous Listening**: The assistant continuously listens for instructions—no typing, clicking, buttons, or screen touches required.
+- **Wake Word Detection**: Responds to `"Hey Optic AI"`, `"Hey Optic"`, or `"Optic"`.
+- **Intelligent Central Coordinator**: Receives voice commands, analyzes intent via NLP, routes to specialized CrewAI agents or the Document Reader, speaks results using Edge-TTS, and seamlessly resumes listening.
+- **Priority Instant Stop**: Saying `"Stop"`, `"Quiet"`, `"Pause"`, or pressing the Escape key or physical volume rockers immediately halts all audio.
+- **Acoustic Safety**: Microphone recognition is paused while Optic AI speaks so it never hears itself, and automatically resumes once speech completes.
 
-### 2. Completely Voice-Controlled Navigation (JAWS & Screen Reader Compliant)
-- **Hands-Free Operation**: Users can control 100% of the app purely by voice without touching the screen.
-- **Screen Reader Announcements**: Immediate voice announcements (`AccessibilityInfo.announceForAccessibility`) for all actions and state changes, fully compliant with JAWS, NVDA, TalkBack, and VoiceOver.
-- **Physical Volume Buttons Push-to-Talk**: Physical volume rockers (KeyCodes `24` & `25`) toggle voice command listening or halt audio narration instantly.
-- **Accessible ARIA / Accessibility Semantics**: Every element includes `accessible={true}`, `accessibilityRole`, `accessibilityLabel`, and `accessibilityHint`.
+### 2. Voice-Controlled Document Reader
+- `"Read my document"` / `"Start reading"` — Reads the loaded document from the current position.
+- `"Read the next paragraph"` / `"Next paragraph"` — Advances to the next paragraph and narrates it.
+- `"Read the previous paragraph"` / `"Previous paragraph"` — Moves back one paragraph and narrates it.
+- `"Read from page five"` / `"Go to page <number>"` — Jumps to any page and begins audio narration.
+- `"Where am I?"` / `"Current position"` — Tells the user their current page, paragraph, and progress.
+- `"Repeat the last response"` / `"Say that again"` — Re-narrates the last answer or paragraph.
 
-### 3. Multiple Agent Summary Modes (CrewAI Architecture)
+### 3. Voice-Controlled File Search & Ingestion
+- Users can say: *"Upload document"*, *"Find file quantum cryptography in downloads"*, or *"Load file unit 4"*.
+- The backend searches Windows directories (`Downloads`, `Documents`, `Desktop`, workspace) for matching PDF files and loads them into memory and disk cache.
+
+### 4. Multiple Agent Summary Modes (CrewAI Architecture)
 Powered by specialized AI agents configured in [`agents.py`](./agents.py) and [`Tasks.py`](./Tasks.py):
-- **Quick Summary Specialist** (`quick`): Generates brief, high-level summaries highlighting only core ideas, stripped of noise for fast audio listening.
-- **Detailed Document Summarizer** (`detailed`): Delivers topic-by-topic structured explanations covering concepts, definitions, examples, and relationships.
-- **Exam Notes & Revision Specialist** (`exam`): Creates exam-ready revision notes, formulas, definitions, and practice questions with answers grounded in the document.
+- **Quick Summary Specialist** (`quick`): Generates brief, high-level summaries highlighting only core ideas.
+- **Detailed Document Summarizer** (`detailed`): Delivers topic-by-topic structured explanations covering concepts, definitions, and examples.
+- **Exam Notes & Revision Specialist** (`exam`): Creates exam-ready revision notes, formulas, definitions, and practice questions.
+- **Document Q&A Specialist** (`qa`): Answers specific user questions based strictly on the uploaded document.
 
-### 4. Grounded Document Q&A (Question & Answer Specialist)
-- **Direct Question Answering** (`qa`): Answers specific user questions based strictly on the uploaded document.
-- **Strict Anti-Hallucination Guard**: Explicitly states when an answer is not present in the document rather than inventing information.
-- **Persistent Context**: Supports follow-up questions without re-uploading the document.
+### 5. Multilingual Edge-TTS Neural Audio
+Generates lifelike neural speech across languages:
+- English: `en-US-ChristopherNeural` / `en-IN-PrabhatNeural`
+- Hindi: `hi-IN-SwaraNeural`
+- Spanish: `es-ES-AlvaroNeural`
+- French: `fr-FR-HenriNeural`
+- German: `de-DE-ConradNeural`
+- Japanese: `ja-JP-KeitaNeural`
 
 ---
 
@@ -43,73 +51,72 @@ e:\final_year_project\
 ├── Tasks.py                  # Agent task definitions & prompt contracts (CrewAI Task)
 ├── crewai.py                 # Agent execution & Google GenAI compatibility engine
 ├── tts_service.py            # Microsoft Edge Neural TTS multilingual synthesis
-├── pdf_utils.py              # Accessible PDF text extraction (pypdf)
-├── main.py                   # Unified FastAPI backend server & audio endpoints
-├── requirements.txt          # Python backend dependencies
-├── .env                      # API keys (GEMINI_API_KEY)
+├── pdf_utils.py              # Accessible PDF extraction & paragraph segmentation (pypdf)
+├── main.py                   # Unified FastAPI backend & Central Voice Orchestrator
+├── run_optic_ai.bat          # 1-Click launcher with automatic port conflict protection
+├── test_all_modes.py         # Verification suite for all modes & voice orchestrator
 │
-├── App.tsx                   # React Native navigation stack
+├── App.tsx                   # React Native navigation stack (MainScreen initial route)
 ├── components/
-│   ├── MainScreen.tsx        # Voice navigation, mode selector, audio player & Q&A
-│   ├── LoginScreen.tsx       # Accessible welcome & onboarding screen
-│   └── HelpScreen.tsx        # Comprehensive voice command guide with speech narration
-├── assets/                   # App icons and splash screens
+│   ├── MainScreen.tsx        # Central hands-free voice interface & document reader
+│   ├── LoginScreen.tsx       # Accessible onboarding screen
+│   └── HelpScreen.tsx        # Voice commands reference with speech readout
+├── assets/                   # App icons and graphics
 ├── package.json              # React Native / Expo dependencies
-├── app.json                  # Expo application configuration
 └── tsconfig.json             # TypeScript configuration
 ```
 
 ---
 
-## 🚀 Quickstart Guide
+## 🚀 How to Run Optic AI
 
-### 1. Backend Setup & Run
+### Option A: One-Click Windows Launcher (Recommended)
+Simply double-click [`run_optic_ai.bat`](./run_optic_ai.bat) or run from CMD:
+```cmd
+cd /d E:\final_year_project
+run_optic_ai.bat
+```
+*Note: This script automatically detects and frees any stale processes on ports 8000 and 8081 before starting the backend and Expo client.*
 
-Activate the virtual environment and start the FastAPI server:
-```bash
-# From workspace root:
+### Option B: Manual Commands in Separate CMD Windows
+
+#### Window 1: Backend Server (Port 8000)
+```cmd
+cd /d E:\final_year_project
 .\myenv\Scripts\activate
-
-# Install dependencies:
-pip install -r requirements.txt
-
-# Start the server:
 python main.py
 ```
-The server starts at `http://0.0.0.0:8000`. Test the interactive API documentation at `http://localhost:8000/docs`.
 
-### 2. Mobile App Setup & Run (React Native / Expo)
-
-Install Node dependencies and start the Expo development server:
-```bash
-npm install
-npx expo start
+#### Window 2: Expo Web / Mobile Client (Port 8081)
+```cmd
+cd /d E:\final_year_project
+npx expo start --web
 ```
-Scan the QR code with **Expo Go** on Android or iOS.
+Access the application in your browser at: **`http://localhost:8081`**
 
 ---
 
-## 🎤 Voice Commands Reference
+## 🎤 Spoken Voice Commands Reference
 
-| Category | Voice Command | Action |
+| Category | Spoken Voice Command | Action |
 | :--- | :--- | :--- |
-| **Modes** | `"Quick summary"` | Activates Quick Summary Specialist |
-| | `"Detailed summary"` | Activates Detailed Document Summarizer |
-| | `"Exam notes"` / `"Revision"` | Activates Exam Revision Specialist |
-| | `"Question answer"` / `"QnA"` | Activates Document Q&A Specialist |
-| **Languages** | `"Language Hindi"` | Sets Edge-TTS & Voice to Hindi (`hi-IN`) |
-| | `"Language Spanish"` | Sets Edge-TTS & Voice to Spanish (`es-ES`) |
-| | `"Language French"` | Sets Edge-TTS & Voice to French (`fr-FR`) |
-| | `"Language German"` | Sets Edge-TTS & Voice to German (`de-DE`) |
-| | `"Language English"` | Sets Edge-TTS & Voice to English (`en-US`) |
-| **Documents** | `"Upload document"` | Opens accessible document picker |
-| | `"Clear document"` | Clears current file and resets screen |
-| **Audio** | `"Play audio"` / `"Read summary"`| Starts Edge-TTS neural audio playback |
-| | `"Stop"` / `"Pause"` | Halts playback and microphone |
-| | `"Download"` / `"Save audio"` | Saves MP3 to device library |
-| | `"Library"` / `"Files"` | Narrates saved audio summaries by number |
-| **Q&A** | `"What is [concept]?"` | Answers question grounded in document |
-| | `"Explain [topic]"` | Explains concept with audio response |
-| **General** | `"Status"` | Announces active file, mode, and language |
-| | `"Help"` | Opens voice commands guide |
-| | **Volume Buttons** | Hardware push-to-talk / stop toggle |
+| **Wake Word** | `"Hey Optic AI"` / `"Hey Optic"` | Awakens assistant and prompts for command |
+| **Navigation** | `"Open document reader"` | Switches to Document Reader mode |
+| | `"Go to question answering"` | Switches to Document Q&A mode |
+| | `"Open my notes"` | Switches to Exam Notes & Revision mode |
+| | `"Start camera"` | Activates camera guidance module |
+| | `"Go back"` / `"Return to home"` | Returns to main home screen |
+| | `"Go to settings"` / `"Help"` | Opens voice commands guide |
+| | `"Stop listening"` | Pauses continuous microphone listening |
+| **Document Reader** | `"Read my document"` / `"Start reading"` | Begins reading from current position |
+| | `"Read the next paragraph"` / `"Next"` | Narrates the next paragraph |
+| | `"Read the previous paragraph"` / `"Previous"` | Narrates the previous paragraph |
+| | `"Read from page five"` / `"Go to page <N>"` | Jumps to page N and begins audio narration |
+| | `"Where am I?"` / `"Current position"` | Speaks current page and paragraph status |
+| | `"Repeat the last response"` | Re-plays the last spoken answer or paragraph |
+| **Summarization** | `"Give me a quick summary"` | Generates concise overview with Quick Summarizer |
+| | `"Give me a detailed summary"` | Generates in-depth breakdown with Detailed Summarizer |
+| | `"Prepare exam-oriented notes"` | Generates revision notes & practice questions |
+| **Document Files** | `"Upload document"` | Prompts for file name/location |
+| | `"Fetch file <name>"` | Automatically searches filesystem and ingests PDF |
+| **Priority Stop** | `"Stop"` / `"Pause"` / `"Quiet"` / `"Cancel"` | Immediately halts all audio and speech |

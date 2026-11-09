@@ -12,7 +12,6 @@ import {
   TouchableOpacity,
   ScrollView,
   Alert,
-  PermissionsAndroid,
   Platform,
   ActivityIndicator,
   AccessibilityInfo,
@@ -29,8 +28,8 @@ import { useNavigation } from "@react-navigation/native";
 import { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import { RootStackParamList } from "../App";
 
-// Current Wi-Fi IP of your PC on your phone's Wi-Fi network: 10.44.224.135
-const DEFAULT_HOST = "10.44.224.135:8000";
+// Current Wi-Fi IP of host PC: 192.168.1.39
+const DEFAULT_HOST = "192.168.1.39:8000";
 const INITIAL_BACKEND_BASE =
   Platform.OS === "web"
     ? typeof window !== "undefined" && window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1"
@@ -38,7 +37,7 @@ const INITIAL_BACKEND_BASE =
       : "http://localhost:8000"
     : `http://${DEFAULT_HOST}`;
 
-export type SummaryMode = "quick" | "detailed" | "exam" | "qa";
+export type SummaryMode = "quick" | "detailed" | "exam" | "qa" | "reader";
 export type SupportedLanguage = "English" | "Hindi" | "French" | "Japanese" | "German" | "Spanish";
 
 const LANGUAGE_LOCALES: Record<SupportedLanguage, string> = {
@@ -64,6 +63,7 @@ const MODE_LABELS: Record<SummaryMode, string> = {
   detailed: "📚 Detailed Summary",
   exam: "🎓 Exam Notes & Revision",
   qa: "💬 Document Q&A",
+  reader: "📖 Document Reader",
 };
 
 type NavigationProp = NativeStackNavigationProp<RootStackParamList, "Main">;
@@ -84,7 +84,9 @@ const MainScreen = () => {
   const [pdfFile, setPdfFile] = useState<any>(null);
 
   // Output State
-  const [summary, setSummary] = useState<string>("Please upload a PDF document to generate an analysis.");
+  const [summary, setSummary] = useState<string>(
+    "Welcome to Optic AI. State your command or say 'Hey Optic, read my document' to begin."
+  );
   const [loading, setLoading] = useState<boolean>(false);
   const [loadingMessage, setLoadingMessage] = useState<string>("");
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
@@ -92,8 +94,12 @@ const MainScreen = () => {
   const [activeSound, setActiveSound] = useState<ExpoAudio.Sound | null>(null);
   const [isSpeaking, setIsSpeaking] = useState<boolean>(false);
 
-  // Purely voice-based file loading state
+  // Hands-free continuous listening state
+  const [continuousListening, setContinuousListening] = useState<boolean>(true);
   const [awaitingVoiceFilePath, setAwaitingVoiceFilePath] = useState<boolean>(false);
+  const [lastSpokenResponse, setLastSpokenResponse] = useState<string>(
+    "Welcome to Optic AI. How can I help you today?"
+  );
 
   // Mode & Multilingual Settings
   const [activeMode, setActiveMode] = useState<SummaryMode>("quick");
@@ -103,24 +109,44 @@ const MainScreen = () => {
   // Custom Q&A Input State
   const [customQuestion, setCustomQuestion] = useState<string>("");
 
-  // Voice Recognition
+  // Voice Recognition State
   const [recognizedText, setRecognizedText] = useState<string>("");
   const [isListening, setIsListening] = useState<boolean>(false);
+  const [wakeWordHeard, setWakeWordHeard] = useState<boolean>(false);
 
+  // Document Reader specific metrics
+  const [readerPage, setReaderPage] = useState<number>(1);
+  const [readerTotalPages, setReaderTotalPages] = useState<number>(1);
+  const [readerParagraph, setReaderParagraph] = useState<number>(1);
+  const [readerTotalParagraphs, setReaderTotalParagraphs] = useState<number>(1);
+
+  // Synchronous State References to prevent race conditions during continuous audio loops
   const activeSoundRef = useRef<ExpoAudio.Sound | null>(null);
+  const isSpeakingRef = useRef<boolean>(false);
+  const continuousListeningRef = useRef<boolean>(true);
   const hasWelcomedRef = useRef<boolean>(false);
   const webRecognitionRef = useRef<any>(null);
+  const restartTimerRef = useRef<any>(null);
 
-  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  useEffect(() => {
+    continuousListeningRef.current = continuousListening;
+  }, [continuousListening]);
+
+  useEffect(() => {
+    isSpeakingRef.current = isSpeaking;
+  }, [isSpeaking]);
 
   // Voice Announcement Helper for Screen Readers (JAWS / TalkBack / VoiceOver)
   const announceAccessibility = (message: string) => {
     AccessibilityInfo.announceForAccessibility(message);
-    console.log(`[JAWS/ScreenReader] ${message}`);
+    console.log(`[ScreenReader] ${message}`);
   };
 
-  // Comprehensive Audio Cleanup: Guarantees zero voice overlap
+  // Comprehensive Audio Cleanup: Guarantees zero voice overlap & resets sound state
   const stopAllAudio = async () => {
+    isSpeakingRef.current = false;
+    setIsSpeaking(false);
+
     try {
       Speech.stop();
     } catch (e) {}
@@ -140,32 +166,58 @@ const MainScreen = () => {
       } catch (e) {}
     }
     setActiveSound(null);
-    setIsSpeaking(false);
+  };
+
+  // Schedule automatic listening resume with acoustic safety buffer
+  const scheduleListeningResume = () => {
+    if (!continuousListeningRef.current) return;
+    if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
+
+    restartTimerRef.current = setTimeout(() => {
+      if (continuousListeningRef.current && !isSpeakingRef.current && !activeSoundRef.current) {
+        startListening();
+      }
+    }, 450);
   };
 
   // Safe voice output with guaranteed single-voice sequencing
   const speakVoiceFeedback = async (message: string) => {
     await stopAllAudio();
+    isSpeakingRef.current = true;
     setIsSpeaking(true);
+
     Speech.speak(message, {
       language: LANGUAGE_LOCALES[selectedLanguage] || "en-US",
-      onDone: () => setIsSpeaking(false),
-      onStopped: () => setIsSpeaking(false),
-      onError: () => setIsSpeaking(false),
+      onDone: () => {
+        isSpeakingRef.current = false;
+        setIsSpeaking(false);
+        scheduleListeningResume();
+      },
+      onStopped: () => {
+        isSpeakingRef.current = false;
+        setIsSpeaking(false);
+      },
+      onError: () => {
+        isSpeakingRef.current = false;
+        setIsSpeaking(false);
+        scheduleListeningResume();
+      },
     });
     console.log(`[Optic-AI Voice Feedback]: ${message}`);
   };
 
-  // Startup Welcome Greeting: Greets user and asks how to help
+  // Startup Welcome Greeting: Welcomes user and immediately initiates hands-free listening loop
   useEffect(() => {
     if (!hasWelcomedRef.current) {
       hasWelcomedRef.current = true;
       const welcomeTimer = setTimeout(async () => {
         await stopAllAudio();
         const welcome =
-          "Welcome to Optic AI. How can I help you today? You can say: upload document, quick summary, detailed summary, exam notes, or ask any question.";
-        speakVoiceFeedback(welcome);
-      }, 1200);
+          "Welcome to Optic AI. I am your hands-free voice assistant. You can say: Hey Optic, read my document, next paragraph, quick summary, detailed summary, exam notes, or ask any question. How can I help you today?";
+        setSummary(welcome);
+        setLastSpokenResponse(welcome);
+        await speakVoiceFeedback(welcome);
+      }, 1000);
       return () => clearTimeout(welcomeTimer);
     }
   }, []);
@@ -184,7 +236,7 @@ const MainScreen = () => {
     }
   }, []);
 
-  // Check backend server health
+  // Check backend server health and sync document state
   const checkServerHealth = async (target?: string) => {
     const url = (target || serverUrl).trim().replace(/\/+$/, "");
     try {
@@ -195,7 +247,15 @@ const MainScreen = () => {
         if (data.active_document && data.active_document !== "None" && data.char_count > 0) {
           setIsDocUploaded(true);
           setFileName(data.active_document);
-          setDocStats(`${data.char_count.toLocaleString()} characters, ${data.page_count || 1} pages`);
+          setDocStats(
+            `${data.char_count.toLocaleString()} characters, ${data.page_count || 1} pages, ${
+              data.paragraphs_count || 1
+            } paragraphs`
+          );
+          setReaderPage(data.current_page || 1);
+          setReaderTotalPages(data.page_count || 1);
+          setReaderParagraph(data.current_paragraph || 1);
+          setReaderTotalParagraphs(data.paragraphs_count || 1);
         }
         return true;
       }
@@ -215,14 +275,16 @@ const MainScreen = () => {
     console.log("[PRIORITY COMMAND] Instant STOP requested.");
     setAwaitingVoiceFilePath(false);
     setLoading(false);
+    if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
+
     try {
       if (Platform.OS === "web" && webRecognitionRef.current) {
-        webRecognitionRef.current.stop();
-        webRecognitionRef.current = null;
+        webRecognitionRef.current.abort();
       } else {
         ExpoSpeechRecognitionModule.stop();
       }
     } catch (e) {}
+
     setIsListening(false);
     await stopAllAudio();
     Speech.speak("Stopped.", { language: "en-US" });
@@ -255,23 +317,12 @@ const MainScreen = () => {
     };
   }, [isListening, isSpeaking, activeSound]);
 
-  // Prompt user by voice for file name and location
-  const handleVoiceUploadPrompt = async () => {
-    await stopAllAudio();
-    setAwaitingVoiceFilePath(true);
-    const promptMsg = "Please state the name of the file or where it is saved on your system.";
-    await speakVoiceFeedback(promptMsg);
-    setTimeout(() => {
-      startListening();
-    }, 2800);
-  };
-
   // Fetch local file from filesystem based on spoken name/location
   const fetchLocalFile = async (query: string) => {
     setAwaitingVoiceFilePath(false);
     await stopAllAudio();
     setLoading(true);
-    setLoadingMessage(`Searching for ${query}...`);
+    setLoadingMessage(`Searching system for "${query}"...`);
 
     try {
       const cleanBase = serverUrl.trim().replace(/\/+$/, "");
@@ -289,92 +340,67 @@ const MainScreen = () => {
       const data = await resp.json();
       setIsDocUploaded(true);
       setFileName(data.document_name);
-      setDocStats(`${data.char_count.toLocaleString()} characters, ${data.page_count} pages`);
+      setDocStats(
+        `${data.char_count.toLocaleString()} characters, ${data.page_count} pages, ${
+          data.paragraphs_count || 1
+        } paragraphs`
+      );
+      setReaderPage(1);
+      setReaderTotalPages(data.page_count || 1);
+      setReaderParagraph(1);
+      setReaderTotalParagraphs(data.paragraphs_count || 1);
 
-      const successMsg = `Successfully loaded ${data.document_name}. How can I help you? You can say: quick summary, detailed summary, exam notes, or ask any question.`;
+      const successMsg = `Successfully loaded ${data.document_name}. What would you like to do? You can say: read my document, quick summary, detailed summary, exam notes, or ask any question.`;
+      setSummary(successMsg);
+      setLastSpokenResponse(successMsg);
       speakVoiceFeedback(successMsg);
     } catch (err: any) {
       console.error("Local file fetch error:", err);
-      speakVoiceFeedback(`Could not find a file matching ${query}. Please tell me the file name or location again, or say cancel.`);
+      const errVoice = `Could not find a file matching ${query}. Please state the file name or location again, or say cancel.`;
+      speakVoiceFeedback(errVoice);
       Alert.alert("File Not Found", err?.message || `Could not find '${query}' on system.`);
     } finally {
       setLoading(false);
     }
   };
 
-  // Immediate Document Upload and Extraction Handler (Manual Fallback)
-  const handleUpload = async () => {
+  // Prompt user by voice for file name and location
+  const handleVoiceUploadPrompt = async () => {
+    await stopAllAudio();
+    setAwaitingVoiceFilePath(true);
+    const promptMsg = "Please state the file name or where it is saved on your system.";
+    await speakVoiceFeedback(promptMsg);
+  };
+
+  // Play neural Edge-TTS audio with guaranteed single-voice sequencing and continuous loop resume
+  const playAudioFromUrl = async (url: string) => {
     try {
       await stopAllAudio();
-      Speech.stop();
-      speakVoiceFeedback("Opening document picker. Please select a PDF file.");
+      isSpeakingRef.current = true;
+      setIsSpeaking(true);
 
-      const result = await DocumentPicker.getDocumentAsync({
-        type: "application/pdf",
-        copyToCacheDirectory: true,
+      const { sound } = await ExpoAudio.Sound.createAsync(
+        { uri: url },
+        { shouldPlay: true }
+      );
+      activeSoundRef.current = sound;
+      setActiveSound(sound);
+
+      sound.setOnPlaybackStatusUpdate((status) => {
+        if (status.isLoaded && status.didJustFinish) {
+          activeSoundRef.current = null;
+          setActiveSound(null);
+          isSpeakingRef.current = false;
+          setIsSpeaking(false);
+          announceAccessibility("Audio playback finished.");
+          scheduleListeningResume();
+        }
       });
-
-      if (!result.canceled && result.assets?.length) {
-        const selected = result.assets[0];
-        setPdfFile(selected);
-        const name = selected.name || "Uploaded_Document.pdf";
-        setFileName(name);
-
-        setLoading(true);
-        setLoadingMessage(`Ingesting ${name}...`);
-        speakVoiceFeedback(`Uploading and extracting text from ${name}.`);
-
-        const cleanBase = serverUrl.trim().replace(/\/+$/, "");
-        const uploadEndpoint = `${cleanBase}/upload-document`;
-
-        const formData = new FormData();
-
-        // Cross-platform binary upload handling
-        if (Platform.OS === "web") {
-          if ((selected as any).file) {
-            formData.append("file", (selected as any).file, name);
-          } else if (selected.uri) {
-            try {
-              const res = await fetch(selected.uri);
-              const blob = await res.blob();
-              formData.append("file", blob, name);
-            } catch (blobErr) {
-              console.warn("Blob fetch failed on web, appending URI:", blobErr);
-            }
-          }
-        } else {
-          formData.append("file", {
-            uri: selected.uri,
-            name: name,
-            type: selected.mimeType || "application/pdf",
-          } as any);
-        }
-
-        const uploadResp = await fetch(uploadEndpoint, {
-          method: "POST",
-          body: formData,
-        });
-
-        if (!uploadResp.ok) {
-          const errData = await uploadResp.json().catch(() => ({}));
-          throw new Error(errData.detail || `Upload returned status ${uploadResp.status}`);
-        }
-
-        const uploadData = await uploadResp.json();
-        setIsDocUploaded(true);
-        setDocStats(`${uploadData.char_count.toLocaleString()} characters, ${uploadData.page_count} pages`);
-        
-        const successMsg = `Document ${name} uploaded successfully. Generating ${MODE_LABELS[activeMode]}...`;
-        speakVoiceFeedback(successMsg);
-
-        // Immediately trigger analysis for the active mode
-        await executeModeAnalysis(activeMode, selectedLanguage);
+    } catch (err) {
+      console.log("Audio playback error, falling back to device speech:", err);
+      if (summary) {
+        speakVoiceFeedback(summary);
       }
-    } catch (err: any) {
-      console.error("Document picker error:", err);
-      speakVoiceFeedback("Failed to upload document. Please check connection.");
-      Alert.alert("Upload Error", err?.message || "Could not upload document.");
-      setLoading(false);
     }
   };
 
@@ -384,6 +410,11 @@ const MainScreen = () => {
     lang: SupportedLanguage,
     customQ?: string
   ) => {
+    if (mode === "reader") {
+      executeDocumentReaderCommand("read");
+      return;
+    }
+
     await stopAllAudio();
     setLoading(true);
     setLoadingMessage(`Generating ${MODE_LABELS[mode]} in ${lang}...`);
@@ -411,10 +442,10 @@ const MainScreen = () => {
       const data = await response.json();
       const outputText = data.text || data.summary || "Analysis completed.";
       setSummary(outputText);
+      setLastSpokenResponse(outputText);
       setAudioUrl(data.audio_url);
       setTextUrl(data.text_url);
 
-      // Play neural Edge-TTS audio directly with single-voice guarantee (NO overlapping voices)
       if (data.audio_url) {
         playAudioFromUrl(data.audio_url);
       } else {
@@ -429,61 +460,81 @@ const MainScreen = () => {
     }
   };
 
-  // Play audio helper with single-voice guarantee
-  const playAudioFromUrl = async (url: string) => {
+  // Execute dedicated Document Reader navigation (Next, Prev, Read, Jump)
+  const executeDocumentReaderCommand = async (action: "read" | "next" | "previous", pageNum?: number) => {
+    await stopAllAudio();
+    setLoading(true);
+    const cleanBase = serverUrl.trim().replace(/\/+$/, "");
+
     try {
-      await stopAllAudio();
+      let endpoint = `${cleanBase}/document-reader/read`;
+      let body: any = {};
 
-      const { sound } = await ExpoAudio.Sound.createAsync(
-        { uri: url },
-        { shouldPlay: true }
-      );
-      activeSoundRef.current = sound;
-      setActiveSound(sound);
-      setIsSpeaking(true);
-
-      sound.setOnPlaybackStatusUpdate((status) => {
-        if (status.isLoaded && status.didJustFinish) {
-          activeSoundRef.current = null;
-          setActiveSound(null);
-          setIsSpeaking(false);
-          announceAccessibility("Audio playback finished.");
-        }
-      });
-    } catch (err) {
-      console.log("Audio playback error, falling back to device speech:", err);
-      if (summary) {
-        speakVoiceFeedback(summary);
+      if (pageNum !== undefined) {
+        endpoint = `${cleanBase}/document-reader/page`;
+        body = { page_number: pageNum };
+      } else if (action === "next" || action === "previous") {
+        endpoint = `${cleanBase}/document-reader/paragraph`;
+        body = { action };
       }
+
+      const resp = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.detail || "Document reader failed.");
+      }
+
+      const data = await resp.json();
+      setActiveMode("reader");
+
+      if (data.status === "end_of_document" || data.status === "start_of_document") {
+        speakVoiceFeedback(data.message);
+        setSummary(data.message);
+        return;
+      }
+
+      const displayText = data.text || data.spoken_text;
+      setSummary(displayText);
+      setLastSpokenResponse(displayText);
+      if (data.current_page) setReaderPage(data.current_page);
+      if (data.page_number) setReaderPage(data.page_number);
+      if (data.total_pages) setReaderTotalPages(data.total_pages);
+      if (data.paragraph_index) setReaderParagraph(data.paragraph_index);
+      if (data.total_paragraphs) setReaderTotalParagraphs(data.total_paragraphs);
+
+      if (data.audio_url) {
+        playAudioFromUrl(data.audio_url);
+      } else {
+        speakVoiceFeedback(data.spoken_text || displayText);
+      }
+    } catch (err: any) {
+      console.error("Reader Error:", err);
+      speakVoiceFeedback(err?.message || "Could not read document.");
+    } finally {
+      setLoading(false);
     }
   };
 
-  // Play / Pause summary button handler
-  const handlePlaySummary = () => {
-    if (audioUrl) {
-      playAudioFromUrl(audioUrl);
-    } else if (summary) {
-      speakVoiceFeedback(summary);
-    } else {
-      speakVoiceFeedback("No analysis available to play.");
-    }
-  };
-
-  // Mode Switch Handler - Immediately analyzes if document is uploaded
+  // Mode Switch Handler
   const handleModeSwitch = (mode: SummaryMode) => {
     setActiveMode(mode);
     speakVoiceFeedback(`Switched to ${MODE_LABELS[mode]}.`);
     if (isDocUploaded) {
       executeModeAnalysis(mode, selectedLanguage);
     } else {
-      speakVoiceFeedback("Please upload a PDF document first.");
+      speakVoiceFeedback("Please load a document first.");
     }
   };
 
   // Multilingual Translator & Audio Synthesizer Handler
   const handleGenerateMultilingual = async (lang: SupportedLanguage) => {
     setSelectedLanguage(lang);
-    if (!summary || summary.startsWith("Please upload")) {
+    if (!summary || summary.startsWith("Welcome to Optic AI")) {
       speakVoiceFeedback("Please upload a document and generate an analysis first.");
       return;
     }
@@ -509,22 +560,107 @@ const MainScreen = () => {
       }
 
       const data = await response.json();
-      setSummary(data.translated_text || data.text);
+      const translated = data.translated_text || data.text;
+      setSummary(translated);
+      setLastSpokenResponse(translated);
       setAudioUrl(data.audio_url);
       setTextUrl(data.text_url);
 
-      // Play translated neural audio directly with single voice
       if (data.audio_url) {
         playAudioFromUrl(data.audio_url);
       } else {
-        speakVoiceFeedback(data.translated_text || data.text);
+        speakVoiceFeedback(translated);
       }
     } catch (err: any) {
-      console.error("Multilingual Generation Error:", err);
+      console.error("Multilingual Error:", err);
       speakVoiceFeedback(`Could not generate audio in ${lang}.`);
       Alert.alert("Translation Error", err?.message || "Failed to generate multilingual audio.");
     } finally {
       setTranslatingAudio(false);
+    }
+  };
+
+  // Manual File Upload Handler (Optional fallback)
+  const handleUpload = async () => {
+    try {
+      await stopAllAudio();
+      speakVoiceFeedback("Opening document picker. Please select a PDF file.");
+
+      const result = await DocumentPicker.getDocumentAsync({
+        type: "application/pdf",
+        copyToCacheDirectory: true,
+      });
+
+      if (!result.canceled && result.assets?.length) {
+        const selected = result.assets[0];
+        setPdfFile(selected);
+        const name = selected.name || "Uploaded_Document.pdf";
+        setFileName(name);
+
+        setLoading(true);
+        setLoadingMessage(`Ingesting ${name}...`);
+
+        const cleanBase = serverUrl.trim().replace(/\/+$/, "");
+        const uploadEndpoint = `${cleanBase}/upload-document`;
+        const formData = new FormData();
+
+        if (Platform.OS === "web") {
+          if ((selected as any).file) {
+            formData.append("file", (selected as any).file, name);
+          } else if (selected.uri) {
+            const res = await fetch(selected.uri);
+            const blob = await res.blob();
+            formData.append("file", blob, name);
+          }
+        } else {
+          formData.append("file", {
+            uri: selected.uri,
+            name: name,
+            type: selected.mimeType || "application/pdf",
+          } as any);
+        }
+
+        const uploadResp = await fetch(uploadEndpoint, {
+          method: "POST",
+          body: formData,
+        });
+
+        if (!uploadResp.ok) {
+          const errData = await uploadResp.json().catch(() => ({}));
+          throw new Error(errData.detail || `Upload returned status ${uploadResp.status}`);
+        }
+
+        const uploadData = await uploadResp.json();
+        setIsDocUploaded(true);
+        setDocStats(
+          `${uploadData.char_count.toLocaleString()} characters, ${uploadData.page_count} pages, ${
+            uploadData.paragraphs_count || 1
+          } paragraphs`
+        );
+        setReaderPage(1);
+        setReaderTotalPages(uploadData.page_count || 1);
+        setReaderParagraph(1);
+        setReaderTotalParagraphs(uploadData.paragraphs_count || 1);
+
+        const successMsg = `Document ${name} uploaded successfully. Generating ${MODE_LABELS[activeMode]}...`;
+        speakVoiceFeedback(successMsg);
+        await executeModeAnalysis(activeMode, selectedLanguage);
+      }
+    } catch (err: any) {
+      console.error("Document picker error:", err);
+      speakVoiceFeedback("Failed to upload document.");
+      setLoading(false);
+    }
+  };
+
+  // Play / Pause summary button handler
+  const handlePlaySummary = () => {
+    if (audioUrl) {
+      playAudioFromUrl(audioUrl);
+    } else if (summary) {
+      speakVoiceFeedback(summary);
+    } else {
+      speakVoiceFeedback("No analysis available to play.");
     }
   };
 
@@ -552,7 +688,6 @@ const MainScreen = () => {
         console.error("Web download error:", e);
       }
     } else {
-      // Mobile native text save
       (async () => {
         try {
           const path = `${FileSystem.documentDirectory || FileSystem.cacheDirectory}${filename}`;
@@ -627,9 +762,11 @@ const MainScreen = () => {
     const SpeechRecognition =
       (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SpeechRecognition) {
-      speakVoiceFeedback("Speech recognition not supported in this browser. Please use Google Chrome or Edge.");
+      speakVoiceFeedback("Speech recognition not supported in this browser. Please use Chrome or Edge.");
       return;
     }
+
+    if (isSpeakingRef.current || activeSoundRef.current) return;
 
     try {
       if (webRecognitionRef.current) {
@@ -640,6 +777,7 @@ const MainScreen = () => {
 
       const recognition = new SpeechRecognition();
       recognition.lang = LANGUAGE_LOCALES[selectedLanguage] || "en-US";
+      recognition.continuous = true;
       recognition.interimResults = false;
       recognition.maxAlternatives = 1;
 
@@ -648,20 +786,27 @@ const MainScreen = () => {
       };
 
       recognition.onresult = (event: any) => {
-        setIsListening(false);
-        const transcript = event.results?.[0]?.[0]?.transcript || "";
-        if (transcript) {
-          processCommand(transcript);
+        const results = event.results;
+        if (!results || !results.length) return;
+        const transcript = results[results.length - 1]?.[0]?.transcript || "";
+        if (transcript.trim()) {
+          processCommand(transcript.trim());
         }
       };
 
       recognition.onerror = (err: any) => {
-        console.log("Web Speech error:", err);
+        console.log("Web Speech error:", err?.error);
         setIsListening(false);
+        if (err?.error !== "aborted") {
+          scheduleListeningResume();
+        }
       };
 
       recognition.onend = () => {
         setIsListening(false);
+        if (continuousListeningRef.current && !isSpeakingRef.current && !activeSoundRef.current) {
+          scheduleListeningResume();
+        }
       };
 
       webRecognitionRef.current = recognition;
@@ -672,15 +817,14 @@ const MainScreen = () => {
     }
   };
 
-  // Voice Command Processor (JAWS & Voice-First Compliant)
+  // Central Voice Command Processor: Communicates with backend Voice Orchestrator
   const processCommand = async (command: string) => {
     const lower = command.toLowerCase().trim();
     setRecognizedText(command);
-    console.log("[JAWS Voice Navigation Command]:", lower);
+    console.log("[Optic-AI Voice Command]:", lower);
 
     // ============================================================
-    // 1. HIGHEST PRIORITY: STOP / PAUSE / QUIET / CANCEL COMMAND
-    // Executed at once before anything else with zero delay!
+    // 1. HIGHEST PRIORITY: Instant STOP / PAUSE Command
     // ============================================================
     if (
       lower === "stop" ||
@@ -698,7 +842,7 @@ const MainScreen = () => {
     }
 
     // ============================================================
-    // 2. Awaiting file name / location from previous voice prompt
+    // 2. Awaiting file name/path from previous voice query
     // ============================================================
     if (awaitingVoiceFilePath) {
       await fetchLocalFile(command);
@@ -706,123 +850,115 @@ const MainScreen = () => {
     }
 
     // ============================================================
-    // 3. Voice-based File Upload Request
+    // 3. Central Intelligent Voice Coordinator (Backend Agent Router)
     // ============================================================
-    if (
-      lower.includes("upload") ||
-      lower.includes("load file") ||
-      lower.includes("open file") ||
-      lower.includes("select file") ||
-      lower.includes("choose file") ||
-      lower.includes("fetch file") ||
-      lower.includes("open document") ||
-      lower.includes("load document")
-    ) {
-      await handleVoiceUploadPrompt();
-      return;
-    }
+    await stopAllAudio();
+    setLoading(true);
+    setLoadingMessage(`Optic AI processing: "${command}"...`);
 
-    // ============================================================
-    // 4. Summary Modes & Navigation
-    // ============================================================
-    if (lower.includes("quick summary") || lower.includes("quick mode") || lower.includes("brief")) {
-      handleModeSwitch("quick");
-      return;
-    }
-    if (lower.includes("detailed summary") || lower.includes("detailed mode") || lower.includes("comprehensive")) {
-      handleModeSwitch("detailed");
-      return;
-    }
-    if (lower.includes("exam notes") || lower.includes("exam mode") || lower.includes("revision") || lower.includes("prepare for exam")) {
-      handleModeSwitch("exam");
-      return;
-    }
-    if (lower.includes("question answer") || lower.includes("q and a") || lower.includes("qna") || lower.includes("ask question")) {
-      handleModeSwitch("qa");
-      return;
-    }
+    try {
+      const cleanBase = serverUrl.trim().replace(/\/+$/, "");
+      const resp = await fetch(`${cleanBase}/voice-orchestrator`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          speech_text: command,
+          language: selectedLanguage,
+        }),
+      });
 
-    // ============================================================
-    // 5. Multilingual Voice Output Commands
-    // ============================================================
-    if (lower.includes("hindi")) {
-      handleGenerateMultilingual("Hindi");
-      return;
-    }
-    if (lower.includes("french")) {
-      handleGenerateMultilingual("French");
-      return;
-    }
-    if (lower.includes("japanese")) {
-      handleGenerateMultilingual("Japanese");
-      return;
-    }
-    if (lower.includes("german")) {
-      handleGenerateMultilingual("German");
-      return;
-    }
-    if (lower.includes("spanish")) {
-      handleGenerateMultilingual("Spanish");
-      return;
-    }
-    if (lower.includes("english")) {
-      handleGenerateMultilingual("English");
-      return;
-    }
+      if (!resp.ok) {
+        throw new Error(`Voice orchestrator error: ${resp.status}`);
+      }
 
-    // ============================================================
-    // 6. Audio Play / Download Controls
-    // ============================================================
-    if (lower.includes("play") || lower.includes("read") || lower.includes("speak")) {
-      handlePlaySummary();
-      return;
-    }
-    if (lower.includes("download audio") || lower.includes("save audio")) {
-      handleDownloadAudioFile();
-      return;
-    }
-    if (lower.includes("download text") || lower.includes("save text")) {
-      handleDownloadTextFile();
-      return;
-    }
+      const data = await resp.json();
+      console.log("[Optic-AI Orchestrator Result]:", data);
 
-    // ============================================================
-    // 7. Status & Help
-    // ============================================================
-    if (lower.includes("status")) {
-      const msg = `Status: Document is ${fileName}. Current mode is ${MODE_LABELS[activeMode]}. Language is ${selectedLanguage}.`;
-      speakVoiceFeedback(msg);
-      return;
-    }
-    if (lower.includes("help") || lower.includes("what can you do") || lower.includes("how can you help")) {
-      const helpMsg =
-        "You can say: upload document to fetch a file, quick summary for an overview, detailed summary for full notes, exam notes for revision and practice questions, or ask any question about the document.";
-      speakVoiceFeedback(helpMsg);
-      return;
-    }
+      if (data.status === "ignored") {
+        scheduleListeningResume();
+        return;
+      }
 
-    // ============================================================
-    // 8. Document Q&A / Natural Language Execution
-    // ============================================================
-    if (
-      activeMode === "qa" ||
-      lower.startsWith("what") ||
-      lower.startsWith("why") ||
-      lower.startsWith("how") ||
-      lower.startsWith("who") ||
-      lower.startsWith("explain") ||
-      lower.includes("?")
-    ) {
-      executeModeAnalysis("qa", selectedLanguage, command);
-    } else {
-      executeModeAnalysis(activeMode, selectedLanguage, command);
+      // Check Wake Word Detection
+      if (data.intent === "WAKE_WORD") {
+        setWakeWordHeard(true);
+        setTimeout(() => setWakeWordHeard(false), 3000);
+      }
+
+      // Handle Stop Listening Intent
+      if (data.intent === "STOP_LISTENING") {
+        setContinuousListening(false);
+        continuousListeningRef.current = false;
+        speakVoiceFeedback(data.spoken_text || "Listening stopped. Say Hey Optic to resume.");
+        return;
+      }
+
+      // Prompt for File Path
+      if (data.intent === "PROMPT_FILE") {
+        setAwaitingVoiceFilePath(true);
+        setSummary(data.text);
+        if (data.audio_url) {
+          playAudioFromUrl(data.audio_url);
+        } else {
+          speakVoiceFeedback(data.spoken_text || data.text);
+        }
+        return;
+      }
+
+      // Handle UI Mode State Synchronization
+      if (data.intent === "NAVIGATE_READER") {
+        setActiveMode("reader");
+      } else if (data.intent === "NAVIGATE_QA" || data.intent === "QA_ANSWER") {
+        setActiveMode("qa");
+      } else if (data.intent === "EXAM_SUMMARY" || data.intent === "NAVIGATE_NOTES") {
+        setActiveMode("exam");
+      } else if (data.intent === "QUICK_SUMMARY") {
+        setActiveMode("quick");
+      } else if (data.intent === "DETAILED_SUMMARY") {
+        setActiveMode("detailed");
+      } else if (data.intent === "NAVIGATE_HELP") {
+        navigation.navigate("Help");
+      } else if (data.intent === "NAVIGATE_HOME") {
+        navigation.navigate("Main");
+      }
+
+      // Document metrics sync
+      if (data.document_name) {
+        setIsDocUploaded(true);
+        setFileName(data.document_name);
+      }
+      if (data.page_number) setReaderPage(data.page_number);
+      if (data.paragraph_index) setReaderParagraph(data.paragraph_index);
+
+      // Display and narrate output
+      const resultText = data.text || data.spoken_text || "Task executed.";
+      setSummary(resultText);
+      setLastSpokenResponse(resultText);
+      setAudioUrl(data.audio_url);
+
+      if (data.audio_url) {
+        playAudioFromUrl(data.audio_url);
+      } else {
+        speakVoiceFeedback(data.spoken_text || resultText);
+      }
+    } catch (err: any) {
+      console.error("Orchestrator request failed:", err);
+      // Client-side fallback if server is unreachable
+      speakVoiceFeedback("Could not reach backend assistant. Checking connection.");
+      scheduleListeningResume();
+    } finally {
+      setLoading(false);
     }
   };
 
   const startListening = async () => {
+    if (isSpeakingRef.current || activeSoundRef.current) {
+      return;
+    }
+
     try {
       await stopAllAudio();
-      await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+      await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
 
       if (Platform.OS === "web") {
         startWebListening();
@@ -836,27 +972,37 @@ const MainScreen = () => {
       }
 
       setIsListening(true);
-      // Clean silent start: do NOT speak "Listening." to avoid mic feedback & double voices!
       ExpoSpeechRecognitionModule.start({
         lang: LANGUAGE_LOCALES[selectedLanguage] || "en-US",
+        continuous: true,
         interimResults: false,
       });
     } catch (err) {
-      console.error("Mic Error:", err);
+      console.error("Mic Start Error:", err);
       setIsListening(false);
     }
   };
 
   const stopListening = async () => {
+    setContinuousListening(false);
+    continuousListeningRef.current = false;
     await handleStopAll();
   };
 
+  // Native Speech Recognition Event Handlers
   useSpeechRecognitionEvent("result", (event) => {
     const text = event.results[0]?.transcript || "";
-    if (!text) return;
+    if (!text.trim()) return;
     setIsListening(false);
-    setRecognizedText(text);
-    processCommand(text);
+    setRecognizedText(text.trim());
+    processCommand(text.trim());
+  });
+
+  useSpeechRecognitionEvent("end", () => {
+    setIsListening(false);
+    if (continuousListeningRef.current && !isSpeakingRef.current && !activeSoundRef.current) {
+      scheduleListeningResume();
+    }
   });
 
   return (
@@ -864,16 +1010,42 @@ const MainScreen = () => {
       <ScrollView
         contentContainerStyle={styles.container}
         accessible={true}
-        accessibilityLabel="Optic AI Main Workspace"
+        accessibilityLabel="Optic AI Hands-Free Voice Assistant Workspace"
       >
         <Text
           style={styles.header}
           accessible={true}
           accessibilityRole="header"
-          accessibilityLabel="Optic AI. Assistive Gen-AI Document Assistant."
+          accessibilityLabel="Optic AI. Hands-Free Voice Assistant for Visually Impaired Users."
         >
           Optic AI
         </Text>
+
+        {/* Central Hands-Free Voice Status Banner */}
+        <View
+          style={[
+            styles.voiceStatusBar,
+            isListening ? styles.voiceStatusListening : styles.voiceStatusIdle,
+          ]}
+          accessible={true}
+          accessibilityLiveRegion="polite"
+          accessibilityLabel={
+            isListening
+              ? "Microphone is actively listening for your voice commands. Say 'Hey Optic' followed by your instruction."
+              : "Voice assistant idle. Say 'Hey Optic' or tap to speak."
+          }
+        >
+          <Text style={styles.voiceStatusTitle}>
+            {isListening ? "🎙️ Continuously Listening" : "💤 Voice Standby"}
+          </Text>
+          <Text style={styles.voiceStatusSubtitle}>
+            {wakeWordHeard
+              ? "⚡ Wake Word Detected! Processing..."
+              : isListening
+              ? "Say 'Hey Optic' followed by: read my document, next paragraph, or exam notes"
+              : "Continuous listening is paused. Say 'Hey Optic' or tap below to resume."}
+          </Text>
+        </View>
 
         {/* Server Status Header Bar */}
         <TouchableOpacity
@@ -887,7 +1059,7 @@ const MainScreen = () => {
             {isServerConnected ? "🟢 Server Online" : "🔴 Server Offline (Tap to Configure IP)"}
           </Text>
           <Text style={styles.serverSubText}>
-            Host: {serverUrl} (Wi-Fi IP: 192.168.1.37:8000)
+            Host: {serverUrl} (Phone Wi-Fi IP: 192.168.1.39:8000)
           </Text>
         </TouchableOpacity>
 
@@ -899,7 +1071,7 @@ const MainScreen = () => {
               style={styles.serverInput}
               value={inputServerUrl}
               onChangeText={setInputServerUrl}
-              placeholder="http://192.168.1.37:8000"
+              placeholder="http://192.168.1.39:8000"
               placeholderTextColor="#90e0ef"
               autoCapitalize="none"
               autoCorrect={false}
@@ -930,7 +1102,7 @@ const MainScreen = () => {
                   checkServerHealth(`http://${DEFAULT_HOST}`);
                 }}
               >
-                <Text style={styles.serverButtonText}>Reset to 192.168.1.37</Text>
+                <Text style={styles.serverButtonText}>Reset to 192.168.1.39</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -942,17 +1114,16 @@ const MainScreen = () => {
           onPress={handleUpload}
           accessible={true}
           accessibilityRole="button"
-          accessibilityLabel={`Upload Document. Current file is ${fileName}`}
-          accessibilityHint="Double tap to open file picker and upload a PDF."
+          accessibilityLabel={`Document: ${fileName}. ${docStats || "Say 'upload document' to load a file."}`}
         >
           <Text style={styles.uploadTitle}>
-            {isDocUploaded ? "✅ Document Ready (Tap to Change)" : "📄 Upload Document (PDF)"}
+            {isDocUploaded ? "📄 Active Study Material" : "📄 No Document Loaded"}
           </Text>
           <Text style={styles.uploadFile}>{fileName}</Text>
           {docStats ? <Text style={styles.uploadStats}>{docStats}</Text> : null}
         </TouchableOpacity>
 
-        {/* Voice-based Document Location Input Banner */}
+        {/* Voice-based Document Search Card */}
         {awaitingVoiceFilePath && (
           <View
             style={styles.voicePromptCard}
@@ -960,9 +1131,9 @@ const MainScreen = () => {
             accessibilityLiveRegion="assertive"
             accessibilityLabel="Voice Search Active. Please speak the file name and location."
           >
-            <Text style={styles.voicePromptTitle}>🎙️ Voice Document Search</Text>
+            <Text style={styles.voicePromptTitle}>🎙️ Voice Document Fetch</Text>
             <Text style={styles.voicePromptSubtitle}>
-              State the file name or where it is saved (e.g., "Post Quantum Cryptography in Downloads").
+              State the file name or location (e.g. "Post Quantum Cryptography in Downloads").
             </Text>
             <TouchableOpacity
               style={styles.voicePromptCancelBtn}
@@ -973,14 +1144,69 @@ const MainScreen = () => {
           </View>
         )}
 
-        {/* Four Distinct Summary & Q&A Mode Tabs */}
+        {/* Dedicated Document Reader Dashboard (Visible when reader mode is active) */}
+        {activeMode === "reader" && (
+          <View
+            style={styles.readerDashboardCard}
+            accessible={true}
+            accessibilityRole="summary"
+            accessibilityLabel={`Document Reader: Page ${readerPage} of ${readerTotalPages}, Paragraph ${readerParagraph} of ${readerTotalParagraphs}`}
+          >
+            <Text style={styles.readerDashboardTitle}>📖 Document Reader Navigation</Text>
+            <View style={styles.readerMetricsRow}>
+              <View style={styles.readerMetricBadge}>
+                <Text style={styles.readerMetricLabel}>PAGE</Text>
+                <Text style={styles.readerMetricValue}>
+                  {readerPage} / {readerTotalPages}
+                </Text>
+              </View>
+              <View style={styles.readerMetricBadge}>
+                <Text style={styles.readerMetricLabel}>PARAGRAPH</Text>
+                <Text style={styles.readerMetricValue}>
+                  {readerParagraph} / {readerTotalParagraphs}
+                </Text>
+              </View>
+            </View>
+            <View style={styles.readerControlButtonsRow}>
+              <TouchableOpacity
+                style={styles.readerNavBtn}
+                onPress={() => executeDocumentReaderCommand("previous")}
+                accessible={true}
+                accessibilityRole="button"
+                accessibilityLabel="Read previous paragraph"
+              >
+                <Text style={styles.readerNavBtnText}>⏮ Previous</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.readerNavBtn, styles.readerNavBtnPrimary]}
+                onPress={() => executeDocumentReaderCommand("read")}
+                accessible={true}
+                accessibilityRole="button"
+                accessibilityLabel="Read current paragraph"
+              >
+                <Text style={styles.readerNavBtnText}>▶ Read</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.readerNavBtn}
+                onPress={() => executeDocumentReaderCommand("next")}
+                accessible={true}
+                accessibilityRole="button"
+                accessibilityLabel="Read next paragraph"
+              >
+                <Text style={styles.readerNavBtnText}>⏭ Next</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        )}
+
+        {/* Mode Selector Tabs (Quick, Detailed, Exam, QA, Reader) */}
         <View
           style={styles.modeContainer}
           accessible={true}
           accessibilityRole="radiogroup"
-          accessibilityLabel="Select Summary Mode"
+          accessibilityLabel="Select Feature Mode"
         >
-          {(["quick", "detailed", "exam", "qa"] as SummaryMode[]).map((mode) => (
+          {(["quick", "detailed", "exam", "qa", "reader"] as SummaryMode[]).map((mode) => (
             <TouchableOpacity
               key={mode}
               style={[styles.modeButton, activeMode === mode && styles.modeButtonActive]}
@@ -989,7 +1215,6 @@ const MainScreen = () => {
               accessibilityRole="radio"
               accessibilityState={{ selected: activeMode === mode }}
               accessibilityLabel={`${MODE_LABELS[mode]} button`}
-              accessibilityHint={`Double tap to generate ${MODE_LABELS[mode]}`}
             >
               <Text style={[styles.modeButtonText, activeMode === mode && styles.modeButtonTextActive]}>
                 {MODE_LABELS[mode]}
@@ -1028,13 +1253,19 @@ const MainScreen = () => {
           style={styles.summaryBox}
           accessible={true}
           accessibilityLiveRegion="assertive"
-          accessibilityLabel={`Analysis Output: ${summary}`}
+          accessibilityLabel={`Output: ${summary}`}
         >
           <View style={styles.summaryHeaderRow}>
             <Text style={styles.summaryHeader}>{MODE_LABELS[activeMode]}</Text>
             <TouchableOpacity
               style={styles.refreshButton}
-              onPress={() => executeModeAnalysis(activeMode, selectedLanguage)}
+              onPress={() => {
+                if (activeMode === "reader") {
+                  executeDocumentReaderCommand("read");
+                } else {
+                  executeModeAnalysis(activeMode, selectedLanguage);
+                }
+              }}
             >
               <Text style={styles.refreshButtonText}>🔄 Refresh</Text>
             </TouchableOpacity>
@@ -1054,9 +1285,7 @@ const MainScreen = () => {
           )}
         </View>
 
-        {/* ======================================================== */}
-        {/* NEW DEDICATED SECTION: MULTILINGUAL AUDIO & TEXT EXPORT  */}
-        {/* ======================================================== */}
+        {/* Multilingual Audio & Text Export Section */}
         <View
           style={styles.multilingualSection}
           accessible={true}
@@ -1064,10 +1293,10 @@ const MainScreen = () => {
           accessibilityLabel="Multilingual Audio and Text Export Section"
         >
           <Text style={styles.multiSectionTitle}>
-            🌐 Multilingual Audio & Text Export
+            🌐 Multilingual Edge Neural Speech
           </Text>
           <Text style={styles.multiSectionSubtitle}>
-            Translate text & synthesize Microsoft Edge Neural Speech in:
+            Translate & synthesize speech in:
           </Text>
 
           {/* Language Selection Pills */}
@@ -1114,7 +1343,7 @@ const MainScreen = () => {
               onPress={handlePlaySummary}
               accessible={true}
               accessibilityRole="button"
-              accessibilityLabel={`Play neural audio in ${selectedLanguage}`}
+              accessibilityLabel={`Play audio in ${selectedLanguage}`}
             >
               <Text style={styles.actionBtnText}>
                 {isSpeaking ? "🔊 Playing Audio" : "▶ Play Audio"}
@@ -1143,33 +1372,36 @@ const MainScreen = () => {
           </View>
         </View>
 
-        {/* Push-to-Talk Voice & Stop Controls Bar */}
+        {/* Voice & Instant Stop Action Controls Bar */}
         <View style={styles.micControls}>
           <TouchableOpacity
             style={[styles.startButton, isListening && styles.listeningActive]}
-            onPress={startListening}
+            onPress={() => {
+              setContinuousListening(true);
+              continuousListeningRef.current = true;
+              startListening();
+            }}
             accessible={true}
             accessibilityRole="button"
             accessibilityLabel={isListening ? "Microphone active. Listening." : "Start Voice Command"}
-            accessibilityHint="Double tap to speak voice commands or use volume rockers."
           >
             <Text style={styles.micControlText}>
-              🎤 {isListening ? "Listening..." : "Speak Command"}
+              🎤 {isListening ? "Listening..." : "Enable Voice"}
             </Text>
           </TouchableOpacity>
 
           <TouchableOpacity
             style={styles.stopButton}
-            onPress={stopListening}
+            onPress={handleStopAll}
             accessible={true}
             accessibilityRole="button"
-            accessibilityLabel="Stop microphone and audio"
+            accessibilityLabel="Instant stop: halts audio and listening"
           >
             <Text style={styles.micControlText}>⏹ Stop</Text>
           </TouchableOpacity>
         </View>
 
-        {/* Spoken Voice Transcription Confirmation */}
+        {/* Spoken Voice Transcription Display */}
         {recognizedText ? (
           <Text
             style={styles.recognizedText}
@@ -1198,29 +1430,51 @@ const styles = StyleSheet.create({
     marginTop: 12,
     letterSpacing: 1,
   },
+  voiceStatusBar: {
+    width: "100%",
+    padding: 14,
+    borderRadius: 14,
+    marginVertical: 10,
+    alignItems: "center",
+    borderWidth: 2,
+  },
+  voiceStatusListening: {
+    backgroundColor: "rgba(0, 180, 216, 0.25)",
+    borderColor: "#00b4d8",
+  },
+  voiceStatusIdle: {
+    backgroundColor: "rgba(255, 255, 255, 0.08)",
+    borderColor: "rgba(255, 255, 255, 0.2)",
+  },
+  voiceStatusTitle: {
+    fontSize: 18,
+    fontWeight: "bold",
+    color: "#caf0f8",
+    marginBottom: 4,
+  },
+  voiceStatusSubtitle: {
+    fontSize: 13,
+    color: "#e0f2fe",
+    textAlign: "center",
+    lineHeight: 18,
+  },
   serverStatusBar: {
     width: "100%",
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: 8,
-    marginTop: 8,
-    marginBottom: 6,
+    padding: 10,
+    borderRadius: 10,
+    marginBottom: 12,
     alignItems: "center",
   },
   serverOnline: {
-    backgroundColor: "rgba(43, 147, 72, 0.35)",
-    borderWidth: 1,
-    borderColor: "#2b9348",
+    backgroundColor: "#0077b6",
   },
   serverOffline: {
-    backgroundColor: "rgba(217, 4, 41, 0.35)",
-    borderWidth: 1,
-    borderColor: "#d90429",
+    backgroundColor: "#d90429",
   },
   serverStatusText: {
     color: "#ffffff",
     fontWeight: "bold",
-    fontSize: 12,
+    fontSize: 14,
   },
   serverSubText: {
     color: "#caf0f8",
@@ -1229,286 +1483,347 @@ const styles = StyleSheet.create({
   },
   serverConfigCard: {
     width: "100%",
-    backgroundColor: "#001f54",
-    borderRadius: 10,
-    padding: 12,
-    marginBottom: 8,
+    backgroundColor: "#002855",
+    padding: 14,
+    borderRadius: 12,
+    marginBottom: 12,
     borderWidth: 1,
-    borderColor: "#023e8a",
+    borderColor: "#0077b6",
   },
   serverConfigLabel: {
-    color: "#90e0ef",
+    color: "#caf0f8",
     fontSize: 12,
-    fontWeight: "bold",
+    fontWeight: "600",
     marginBottom: 6,
   },
   serverInput: {
-    backgroundColor: "#001233",
+    backgroundColor: "#001845",
     color: "#ffffff",
-    borderRadius: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    fontSize: 13,
+    borderRadius: 8,
+    padding: 10,
+    fontSize: 14,
     borderWidth: 1,
     borderColor: "#0077b6",
+    marginBottom: 10,
   },
   serverConfigButtons: {
     flexDirection: "row",
     justifyContent: "space-between",
-    marginTop: 8,
   },
   testServerButton: {
-    backgroundColor: "#0096c7",
+    backgroundColor: "#0077b6",
     paddingVertical: 8,
-    paddingHorizontal: 14,
-    borderRadius: 6,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    flex: 1,
+    marginRight: 6,
+    alignItems: "center",
   },
   resetServerButton: {
     backgroundColor: "#023e8a",
     paddingVertical: 8,
-    paddingHorizontal: 14,
-    borderRadius: 6,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    flex: 1,
+    marginLeft: 6,
+    alignItems: "center",
   },
   serverButtonText: {
     color: "#ffffff",
-    fontWeight: "bold",
     fontSize: 12,
+    fontWeight: "600",
   },
   uploadBox: {
-    borderWidth: 2,
-    borderColor: "#90e0ef",
-    borderStyle: "dashed",
-    borderRadius: 12,
-    padding: 16,
-    marginVertical: 6,
     width: "100%",
+    backgroundColor: "#002855",
+    padding: 16,
+    borderRadius: 12,
     alignItems: "center",
-    backgroundColor: "rgba(0, 119, 182, 0.15)",
+    marginBottom: 12,
+    borderWidth: 1.5,
+    borderColor: "#0077b6",
   },
   uploadBoxReady: {
-    borderColor: "#2b9348",
-    backgroundColor: "rgba(43, 147, 72, 0.15)",
-    borderStyle: "solid",
+    borderColor: "#48cae4",
+    backgroundColor: "#023e8a",
   },
   uploadTitle: {
+    color: "#caf0f8",
     fontSize: 16,
     fontWeight: "bold",
-    color: "#ffffff",
   },
   uploadFile: {
-    color: "#caf0f8",
+    color: "#ffffff",
+    fontSize: 14,
     marginTop: 4,
-    fontSize: 13,
-    fontWeight: "500",
+    fontWeight: "600",
   },
   uploadStats: {
     color: "#90e0ef",
-    marginTop: 2,
-    fontSize: 11,
+    fontSize: 12,
+    marginTop: 4,
   },
   voicePromptCard: {
     width: "100%",
-    backgroundColor: "rgba(255, 183, 3, 0.2)",
-    borderWidth: 2,
-    borderColor: "#ffb703",
+    backgroundColor: "#d90429",
+    padding: 16,
     borderRadius: 12,
-    padding: 14,
-    marginVertical: 8,
+    marginBottom: 12,
+    borderWidth: 2,
+    borderColor: "#ff4d6d",
     alignItems: "center",
   },
   voicePromptTitle: {
-    color: "#ffb703",
-    fontSize: 16,
+    color: "#ffffff",
+    fontSize: 18,
     fontWeight: "bold",
-    marginBottom: 4,
+    marginBottom: 6,
   },
   voicePromptSubtitle: {
-    color: "#ffffff",
-    fontSize: 13,
+    color: "#fff0f3",
+    fontSize: 14,
     textAlign: "center",
-    marginBottom: 8,
+    marginBottom: 10,
   },
   voicePromptCancelBtn: {
-    backgroundColor: "#d90429",
-    paddingVertical: 5,
-    paddingHorizontal: 16,
-    borderRadius: 6,
+    backgroundColor: "rgba(0,0,0,0.35)",
+    paddingVertical: 6,
+    paddingHorizontal: 14,
+    borderRadius: 8,
   },
   voicePromptCancelText: {
     color: "#ffffff",
     fontSize: 12,
     fontWeight: "bold",
   },
+  readerDashboardCard: {
+    width: "100%",
+    backgroundColor: "#023e8a",
+    padding: 16,
+    borderRadius: 14,
+    marginBottom: 12,
+    borderWidth: 1.5,
+    borderColor: "#48cae4",
+  },
+  readerDashboardTitle: {
+    color: "#caf0f8",
+    fontSize: 16,
+    fontWeight: "bold",
+    textAlign: "center",
+    marginBottom: 10,
+  },
+  readerMetricsRow: {
+    flexDirection: "row",
+    justifyContent: "space-around",
+    marginBottom: 12,
+  },
+  readerMetricBadge: {
+    backgroundColor: "#001845",
+    paddingVertical: 8,
+    paddingHorizontal: 20,
+    borderRadius: 10,
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: "#0077b6",
+  },
+  readerMetricLabel: {
+    color: "#90e0ef",
+    fontSize: 10,
+    fontWeight: "bold",
+  },
+  readerMetricValue: {
+    color: "#ffffff",
+    fontSize: 18,
+    fontWeight: "bold",
+    marginTop: 2,
+  },
+  readerControlButtonsRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+  },
+  readerNavBtn: {
+    backgroundColor: "#0077b6",
+    flex: 1,
+    paddingVertical: 10,
+    marginHorizontal: 4,
+    borderRadius: 8,
+    alignItems: "center",
+  },
+  readerNavBtnPrimary: {
+    backgroundColor: "#00b4d8",
+  },
+  readerNavBtnText: {
+    color: "#ffffff",
+    fontWeight: "bold",
+    fontSize: 13,
+  },
   modeContainer: {
     flexDirection: "row",
     flexWrap: "wrap",
     justifyContent: "space-between",
     width: "100%",
-    marginVertical: 8,
+    marginBottom: 12,
   },
   modeButton: {
-    width: "48.5%",
     backgroundColor: "#002855",
-    paddingVertical: 12,
-    paddingHorizontal: 8,
-    marginVertical: 4,
-    borderRadius: 8,
-    alignItems: "center",
-    borderWidth: 1,
-    borderColor: "#023e8a",
-  },
-  modeButtonActive: {
-    backgroundColor: "#0077b6",
-    borderColor: "#90e0ef",
-  },
-  modeButtonText: {
-    color: "#ade8f4",
-    fontSize: 12,
-    fontWeight: "bold",
-    textAlign: "center",
-  },
-  modeButtonTextActive: {
-    color: "#ffffff",
-  },
-  qaInputContainer: {
-    flexDirection: "row",
-    width: "100%",
-    marginVertical: 6,
-  },
-  qaTextInput: {
-    flex: 1,
-    backgroundColor: "#001233",
-    color: "#ffffff",
-    borderRadius: 8,
-    paddingHorizontal: 12,
     paddingVertical: 10,
-    fontSize: 13,
+    paddingHorizontal: 10,
+    borderRadius: 10,
+    marginVertical: 4,
+    width: "48%",
+    alignItems: "center",
     borderWidth: 1,
     borderColor: "#0077b6",
   },
+  modeButtonActive: {
+    backgroundColor: "#00b4d8",
+    borderColor: "#caf0f8",
+  },
+  modeButtonText: {
+    color: "#caf0f8",
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  modeButtonTextActive: {
+    color: "#001845",
+    fontWeight: "bold",
+  },
+  qaInputContainer: {
+    width: "100%",
+    flexDirection: "row",
+    marginBottom: 12,
+  },
+  qaTextInput: {
+    flex: 1,
+    backgroundColor: "#002855",
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    color: "#ffffff",
+    borderWidth: 1,
+    borderColor: "#0077b6",
+    marginRight: 8,
+    fontSize: 14,
+  },
   qaSubmitButton: {
-    backgroundColor: "#0096c7",
-    paddingHorizontal: 16,
+    backgroundColor: "#00b4d8",
+    paddingHorizontal: 18,
+    borderRadius: 10,
     justifyContent: "center",
     alignItems: "center",
-    borderRadius: 8,
-    marginLeft: 6,
   },
   qaSubmitButtonText: {
-    color: "#ffffff",
+    color: "#001845",
     fontWeight: "bold",
-    fontSize: 13,
+    fontSize: 14,
   },
   summaryBox: {
-    backgroundColor: "#001233",
-    borderRadius: 12,
-    padding: 14,
     width: "100%",
-    marginVertical: 6,
+    backgroundColor: "#001845",
+    padding: 16,
+    borderRadius: 14,
+    marginBottom: 14,
     borderWidth: 1,
-    borderColor: "#002855",
+    borderColor: "#0077b6",
   },
   summaryHeaderRow: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    marginBottom: 8,
+    marginBottom: 10,
     borderBottomWidth: 1,
-    borderBottomColor: "#023e8a",
+    borderBottomColor: "#002855",
     paddingBottom: 6,
   },
   summaryHeader: {
-    color: "#90e0ef",
-    fontSize: 15,
+    color: "#48cae4",
+    fontSize: 16,
     fontWeight: "bold",
   },
   refreshButton: {
+    backgroundColor: "#002855",
     paddingVertical: 4,
-    paddingHorizontal: 8,
-    backgroundColor: "#023e8a",
+    paddingHorizontal: 10,
     borderRadius: 6,
   },
   refreshButtonText: {
-    color: "#caf0f8",
-    fontSize: 11,
-    fontWeight: "600",
+    color: "#90e0ef",
+    fontSize: 12,
   },
   summaryText: {
-    color: "#e0e1dd",
-    fontSize: 13.5,
+    color: "#ffffff",
+    fontSize: 15,
     lineHeight: 22,
   },
   loadingContainer: {
-    height: 180,
-    justifyContent: "center",
+    paddingVertical: 35,
     alignItems: "center",
   },
   loadingText: {
-    color: "#90e0ef",
-    marginTop: 10,
-    fontSize: 13,
+    color: "#caf0f8",
+    marginTop: 12,
+    fontSize: 14,
   },
   multilingualSection: {
     width: "100%",
-    backgroundColor: "#03045e",
-    borderRadius: 12,
-    padding: 14,
-    marginVertical: 8,
+    backgroundColor: "#002855",
+    padding: 16,
+    borderRadius: 14,
+    marginBottom: 16,
     borderWidth: 1,
     borderColor: "#0077b6",
   },
   multiSectionTitle: {
-    color: "#ffffff",
-    fontSize: 15,
+    color: "#caf0f8",
+    fontSize: 16,
     fontWeight: "bold",
     textAlign: "center",
   },
   multiSectionSubtitle: {
     color: "#90e0ef",
-    fontSize: 11.5,
+    fontSize: 12,
     textAlign: "center",
     marginTop: 3,
-    marginBottom: 10,
+    marginBottom: 12,
   },
   languagePillsContainer: {
     flexDirection: "row",
     flexWrap: "wrap",
-    justifyContent: "space-between",
-    marginBottom: 10,
+    justifyContent: "center",
+    marginBottom: 12,
   },
   langPill: {
-    width: "31.5%",
-    backgroundColor: "#002855",
-    paddingVertical: 8,
-    marginVertical: 3,
-    borderRadius: 6,
-    alignItems: "center",
+    backgroundColor: "#001845",
+    paddingVertical: 7,
+    paddingHorizontal: 12,
+    borderRadius: 20,
+    margin: 4,
     borderWidth: 1,
-    borderColor: "#023e8a",
+    borderColor: "#0077b6",
   },
   langPillActive: {
-    backgroundColor: "#0096c7",
-    borderColor: "#90e0ef",
+    backgroundColor: "#00b4d8",
+    borderColor: "#ffffff",
   },
   langPillText: {
-    color: "#ade8f4",
-    fontSize: 11,
+    color: "#caf0f8",
+    fontSize: 12,
     fontWeight: "600",
   },
   langPillTextActive: {
-    color: "#ffffff",
+    color: "#001845",
     fontWeight: "bold",
   },
   translatingIndicator: {
     flexDirection: "row",
-    alignItems: "center",
     justifyContent: "center",
-    marginBottom: 8,
+    alignItems: "center",
+    marginBottom: 10,
   },
   translatingText: {
     color: "#48cae4",
     fontSize: 12,
-    marginLeft: 6,
+    marginLeft: 8,
   },
   actionButtonsGrid: {
     flexDirection: "row",
@@ -1518,13 +1833,12 @@ const styles = StyleSheet.create({
   actionBtn: {
     flex: 1,
     paddingVertical: 10,
-    marginHorizontal: 3,
     borderRadius: 8,
+    marginHorizontal: 3,
     alignItems: "center",
-    justifyContent: "center",
   },
   playBtn: {
-    backgroundColor: "#0096c7",
+    backgroundColor: "#00b4d8",
   },
   downloadAudioBtn: {
     backgroundColor: "#0077b6",
@@ -1535,44 +1849,44 @@ const styles = StyleSheet.create({
   actionBtnText: {
     color: "#ffffff",
     fontWeight: "bold",
-    fontSize: 12,
+    fontSize: 11,
   },
   micControls: {
     flexDirection: "row",
-    justifyContent: "space-between",
     width: "100%",
-    marginVertical: 8,
+    justifyContent: "space-between",
+    marginBottom: 12,
   },
   startButton: {
     flex: 2,
-    backgroundColor: "#0096c7",
-    borderRadius: 10,
-    paddingVertical: 12,
+    backgroundColor: "#0077b6",
+    paddingVertical: 14,
+    borderRadius: 12,
     alignItems: "center",
-    marginRight: 6,
+    marginRight: 8,
   },
   listeningActive: {
-    backgroundColor: "#2b9348",
+    backgroundColor: "#d90429",
   },
   stopButton: {
     flex: 1,
     backgroundColor: "#d90429",
-    borderRadius: 10,
-    paddingVertical: 12,
+    paddingVertical: 14,
+    borderRadius: 12,
     alignItems: "center",
-    marginLeft: 6,
   },
   micControlText: {
     color: "#ffffff",
-    fontSize: 15,
+    fontSize: 16,
     fontWeight: "bold",
   },
   recognizedText: {
     color: "#caf0f8",
-    fontSize: 12,
+    fontSize: 14,
     fontStyle: "italic",
     textAlign: "center",
     marginTop: 4,
+    marginBottom: 14,
   },
 });
 
