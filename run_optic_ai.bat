@@ -22,6 +22,10 @@ ping 127.0.0.1 -n 3 >nul
 echo [3/3] Starting Optic-AI Expo Frontend Client (Port 8081)...
 start "Optic-AI Expo Client (Port 8081)" cmd /k "cd /d E:\final_year_project && npx expo start --web"
 
+ping 127.0.0.1 -n 4 >nul
+echo [Opening] Launching Optic-AI in your default web browser...
+start http://localhost:8081
+
 echo.
 echo ========================================================
 echo  Optic-AI is running!
