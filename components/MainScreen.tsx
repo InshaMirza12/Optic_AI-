@@ -409,7 +409,14 @@ const MainScreen = () => {
 
     setIsListening(false);
     await stopAllAudio();
-    Speech.speak("Stopped.", { language: "en-US" });
+    Speech.speak("Stopped.", {
+      language: "en-US",
+      onDone: () => {
+        if (continuousListeningRef.current) {
+          scheduleListeningResume();
+        }
+      },
+    });
   };
 
   // Hardware volume button interception for push-to-talk / instant stop
