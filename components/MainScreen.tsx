@@ -192,6 +192,45 @@ const MainScreen = () => {
     setActiveSound(null);
   };
 
+  // Instant Web Audio Wake Chime (0ms latency, synthesized locally like Siri/Alexa)
+  const playWakeChime = () => {
+    try {
+      if (Platform.OS === "web" && typeof window !== "undefined") {
+        const AudioCtx = (window as any).AudioContext || (window as any).webkitAudioContext;
+        if (AudioCtx) {
+          const ctx = new AudioCtx();
+          const now = ctx.currentTime;
+
+          // First chime tone (587.33 Hz - D5)
+          const osc1 = ctx.createOscillator();
+          const gain1 = ctx.createGain();
+          osc1.type = "sine";
+          osc1.frequency.setValueAtTime(587.33, now);
+          gain1.gain.setValueAtTime(0.18, now);
+          gain1.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+          osc1.connect(gain1);
+          gain1.connect(ctx.destination);
+          osc1.start(now);
+          osc1.stop(now + 0.16);
+
+          // Second harmonic chime tone (880 Hz - A5)
+          const osc2 = ctx.createOscillator();
+          const gain2 = ctx.createGain();
+          osc2.type = "sine";
+          osc2.frequency.setValueAtTime(880, now + 0.08);
+          gain2.gain.setValueAtTime(0.22, now + 0.08);
+          gain2.gain.exponentialRampToValueAtTime(0.001, now + 0.32);
+          osc2.connect(gain2);
+          gain2.connect(ctx.destination);
+          osc2.start(now + 0.08);
+          osc2.stop(now + 0.32);
+        }
+      }
+    } catch (e) {
+      console.log("[Wake Chime error]:", e);
+    }
+  };
+
   // Schedule automatic listening resume with acoustic safety buffer
   const scheduleListeningResume = () => {
     if (!continuousListeningRef.current) return;
@@ -270,8 +309,9 @@ const MainScreen = () => {
     hasWelcomedRef.current = true;
 
     await stopAllAudio();
-    const welcome =
-      "Welcome to Optic AI. I am your hands-free voice assistant. Tell me the document you want to upload, or you can say: read my document, next paragraph, quick summary, detailed summary, exam notes, or ask any question. How can I help you today?";
+    const welcome = isDocUploaded
+      ? `Welcome to Optic AI. Document ${fileName} is ready. Say 'Hey Optic AI' followed by your command, such as: read my document, next paragraph, quick summary, detailed summary, exam notes, or ask any question.`
+      : `Welcome to Optic AI. I am your hands-free voice assistant. Tell me the document you want to upload, such as 'take cryptography from my downloads folder', or say 'upload document' or 'list my files'. You can also say 'Hey Optic AI' at any time. How can I help you today?`;
     setSummary(welcome);
     setLastSpokenResponse(welcome);
     await speakVoiceFeedback(welcome);
@@ -871,7 +911,7 @@ const MainScreen = () => {
       const recognition = new SpeechRecognition();
       recognition.lang = LANGUAGE_LOCALES[selectedLanguage] || "en-US";
       recognition.continuous = true;
-      recognition.interimResults = false;
+      recognition.interimResults = true;
       recognition.maxAlternatives = 1;
 
       recognition.onstart = () => {
@@ -879,16 +919,22 @@ const MainScreen = () => {
       };
 
       recognition.onresult = (event: any) => {
-        let latestTranscript = "";
+        let interimText = "";
+        let finalText = "";
         const startIndex = typeof event.resultIndex === "number" ? event.resultIndex : 0;
         for (let i = startIndex; i < event.results.length; i++) {
-          if (event.results[i] && event.results[i][0]) {
-            latestTranscript += event.results[i][0].transcript + " ";
+          const item = event.results[i];
+          if (item && item[0]) {
+            if (item.isFinal) {
+              finalText += item[0].transcript + " ";
+            } else {
+              interimText += item[0].transcript + " ";
+            }
           }
         }
-        latestTranscript = latestTranscript.trim();
-        if (latestTranscript) {
-          handleIncomingSpeech(latestTranscript);
+        const textToProcess = (finalText || interimText).trim();
+        if (textToProcess) {
+          handleIncomingSpeech(textToProcess, !!finalText);
         }
       };
 
@@ -923,17 +969,16 @@ const MainScreen = () => {
     }
   };
 
-  // Unified Speech Accumulator & Silence Debouncer:
-  // Allows user to finish their full statement/question comfortably without getting cut off!
-  const handleIncomingSpeech = (transcript: string) => {
-    if (isProcessingCommandRef.current || isSpeakingRef.current) return;
-
+  // Unified Speech Accumulator & Real-time Wake-Word / Interruption Debouncer
+  const handleIncomingSpeech = (transcript: string, isFinal: boolean = true) => {
     const trimmed = transcript.trim();
     if (!trimmed) return;
 
     const lower = trimmed.toLowerCase();
 
-    // Priority STOP commands execute immediately (0ms debounce)
+    // ============================================================
+    // 1. HIGHEST PRIORITY STOP COMMAND: Runs even while speaking!
+    // ============================================================
     if (
       lower === "stop" ||
       lower.startsWith("stop") ||
@@ -945,28 +990,41 @@ const MainScreen = () => {
       lower.includes("cancel") ||
       lower.includes("halt")
     ) {
+      console.log("[INTERRUPTION DETECTED] Immediate STOP requested!");
       if (speechDebounceTimerRef.current) clearTimeout(speechDebounceTimerRef.current);
       speechAccumulatorRef.current = "";
       handleStopAll();
       return;
     }
 
-    // Wake Word Immediate Detection ("Hey Optic", "Hey Optic AI", "Optic", "Hey Optics")
-    const WAKE_WORD_ONLY_REGEX = /^(hey|hi|hello|ok|okay)?\s*(optic\s*ai|optics\s*ai|optic\s*eye|optics|optic|optik)[,.!?\s]*$/i;
-    if (WAKE_WORD_ONLY_REGEX.test(lower)) {
-      console.log("[Optic-AI Wake Word Detected]: Instant acknowledgment");
-      setWakeWordHeard(true);
-      setTimeout(() => setWakeWordHeard(false), 3500);
-      if (speechDebounceTimerRef.current) clearTimeout(speechDebounceTimerRef.current);
-      speechAccumulatorRef.current = "";
-      processCommand("hey optic");
+    // If assistant is actively speaking and the user didn't say stop, ignore acoustic playback
+    if (isSpeakingRef.current || isProcessingCommandRef.current) {
       return;
     }
 
-    const WAKE_WORD_PREFIX_REGEX = /^(hey|hi|hello|ok|okay)?\s*(optic\s*ai|optics\s*ai|optic\s*eye|optics|optic|optik)[,.!?\s]+/i;
-    if (WAKE_WORD_PREFIX_REGEX.test(lower)) {
-      setWakeWordHeard(true);
-      setTimeout(() => setWakeWordHeard(false), 3500);
+    // ============================================================
+    // 2. SMART WAKE-WORD DETECTION ("Hey Optic AI" / "Hey Optic")
+    // ============================================================
+    const WAKE_WORD_CHECK = /\b(hey\s+optic\s+ai|hey\s+optic|optic\s+ai|optic|hey\s+optics|ok\s+optic|hello\s+optic)\b/i;
+    if (WAKE_WORD_CHECK.test(lower)) {
+      if (!wakeWordHeard) {
+        console.log("[Optic-AI Wake Word Triggered]: Playing chime");
+        playWakeChime();
+        setWakeWordHeard(true);
+        setTimeout(() => setWakeWordHeard(false), 4000);
+      }
+
+      // Check if user spoke ONLY the wake word (e.g. "Hey Optic AI")
+      const cleanedAfterWake = lower
+        .replace(/^(hey|hi|hello|ok|okay)?\s*(optic\s*ai|optics\s*ai|optic\s*eye|optics|optic|optik)[,.!?\s]*/i, "")
+        .trim();
+
+      if (!cleanedAfterWake && isFinal) {
+        if (speechDebounceTimerRef.current) clearTimeout(speechDebounceTimerRef.current);
+        speechAccumulatorRef.current = "";
+        processCommand("hey optic");
+        return;
+      }
     }
 
     // Accumulate the spoken statement and display live transcription
@@ -978,8 +1036,8 @@ const MainScreen = () => {
       clearTimeout(speechDebounceTimerRef.current);
     }
 
-    // Natural conversation pause: waits 1.8 seconds of complete silence before executing
-    const SILENCE_TIMEOUT = 1800;
+    // Natural conversation pause: waits 1.6 seconds of complete silence before executing
+    const SILENCE_TIMEOUT = 1600;
     speechDebounceTimerRef.current = setTimeout(() => {
       const fullUtterance = speechAccumulatorRef.current.trim();
       speechAccumulatorRef.current = "";
@@ -1151,7 +1209,7 @@ const MainScreen = () => {
         return;
       }
 
-      // Prompt for File Path
+      // Prompt for File Path (Voice-Guided Upload)
       if (data.intent === "PROMPT_FILE") {
         setAwaitingVoiceFilePath(true);
         setSummary(data.text);
@@ -1160,6 +1218,21 @@ const MainScreen = () => {
         } else {
           speakVoiceFeedback(data.spoken_text || data.text);
         }
+        return;
+      }
+
+      // Hands-Free Document Picker Trigger
+      if (data.intent === "OPEN_FILE_PICKER") {
+        setAwaitingVoiceFilePath(false);
+        setSummary(data.text);
+        if (data.audio_url) {
+          playAudioFromUrl(data.audio_url);
+        } else {
+          speakVoiceFeedback(data.spoken_text || data.text);
+        }
+        setTimeout(() => {
+          handleUpload();
+        }, 1200);
         return;
       }
 
@@ -1324,19 +1397,21 @@ const MainScreen = () => {
         accessibilityLabel="Top Navigation Bar"
       >
         <View style={styles.navBrandContainer}>
-          <Image
-            source={OPTIC_LOGO}
-            style={styles.navLogoImage}
-            resizeMode="contain"
-            accessible={true}
-            accessibilityLabel="Optic AI Personalized Logo"
-          />
+          <View style={styles.navLogoGlowContainer}>
+            <Image
+              source={OPTIC_LOGO}
+              style={styles.navLogoImage}
+              resizeMode="contain"
+              accessible={true}
+              accessibilityLabel="Optic AI Emblem"
+            />
+          </View>
           <View style={styles.navBrandTextGroup}>
             <View style={styles.navBrandRow}>
               <Text style={styles.navLogo}>OPTIC</Text>
               <Text style={styles.navLogoAI}>AI</Text>
             </View>
-            <Text style={styles.navTagline}>Advancing Vision Through Intelligence</Text>
+            <Text style={styles.navTagline}>ADVANCING VISION THROUGH INTELLIGENCE</Text>
           </View>
           <View style={styles.navVoiceBadge}>
             <Text style={styles.navVoiceBadgeText}>Voice Agentic</Text>
@@ -1532,18 +1607,17 @@ const MainScreen = () => {
             <View style={styles.tabContentBlock}>
               {/* Hero Presentation Header */}
               <View style={styles.heroSection}>
-                {/* Personalized Optic AI Logo Card */}
-                <View style={styles.heroLogoBanner}>
-                  <Image
-                    source={OPTIC_LOGO}
-                    style={styles.heroLogoImage}
-                    resizeMode="contain"
-                    accessible={true}
-                    accessibilityLabel="Optic AI - Advancing Vision Through Intelligence"
-                  />
-                </View>
-
                 <View style={styles.heroBadgeRow}>
+                  <View style={styles.heroBrandPill}>
+                    <Image
+                      source={OPTIC_LOGO}
+                      style={styles.heroBrandPillLogo}
+                      resizeMode="contain"
+                      accessible={true}
+                      accessibilityLabel="Optic AI Emblem"
+                    />
+                    <Text style={styles.heroBrandPillText}>OPTIC AI</Text>
+                  </View>
                   <View style={styles.heroPill}>
                     <Text style={styles.heroPillText}>🎙️ 100% Hands-Free Voice Assistant</Text>
                   </View>
@@ -2624,12 +2698,21 @@ const styles = StyleSheet.create({
     alignItems: "center",
     marginRight: 16,
   },
-  navLogoImage: {
-    width: 36,
-    height: 36,
-    borderRadius: 8,
-    marginRight: 10,
+  navLogoGlowContainer: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    overflow: "hidden",
+    borderWidth: 1.5,
+    borderColor: "#2563EB",
     backgroundColor: "#1E2227",
+    marginRight: 10,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  navLogoImage: {
+    width: 38,
+    height: 38,
   },
   navBrandTextGroup: {
     marginRight: 10,
@@ -2737,30 +2820,35 @@ const styles = StyleSheet.create({
     paddingVertical: 18,
     marginBottom: 10,
   },
-  heroLogoBanner: {
-    alignItems: "center",
-    justifyContent: "center",
-    marginBottom: 16,
-    padding: 10,
-    backgroundColor: "#1E2227",
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: "rgba(216, 199, 165, 0.35)",
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    width: "100%",
-    maxWidth: 480,
-  },
-  heroLogoImage: {
-    width: "100%",
-    height: 120,
-  },
   heroBadgeRow: {
     flexDirection: "row",
     alignItems: "center",
-    marginBottom: 12,
+    marginBottom: 14,
+    flexWrap: "wrap",
+    justifyContent: "center",
+    gap: 8,
+  },
+  heroBrandPill: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "rgba(37, 99, 235, 0.15)",
+    paddingVertical: 5,
+    paddingHorizontal: 12,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: "rgba(37, 99, 235, 0.4)",
+  },
+  heroBrandPillLogo: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    marginRight: 6,
+  },
+  heroBrandPillText: {
+    color: "#60A5FA",
+    fontSize: 12,
+    fontWeight: "bold",
+    letterSpacing: 0.8,
   },
   heroPill: {
     backgroundColor: "rgba(216, 199, 165, 0.12)",

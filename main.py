@@ -211,6 +211,45 @@ def extract_file_search_intent(text: str) -> Tuple[str, Optional[str]]:
     return kw, folder_pref
 
 
+def get_available_user_pdfs(limit: int = 4) -> List[Dict[str, str]]:
+    """Discovers available PDF documents in standard user locations to provide voice suggestions."""
+    candidate_dirs = [
+        r"C:\Users\LH\Downloads",
+        os.path.expanduser(r"~\Downloads"),
+        r"C:\Users\LH\Documents",
+        os.path.expanduser(r"~\Documents"),
+        os.path.expanduser(r"~\Desktop"),
+        r"e:\final_year_project",
+        os.path.dirname(os.path.abspath(__file__)),
+    ]
+    seen_names = set()
+    results = []
+    for s_dir in candidate_dirs:
+        if not s_dir or not os.path.isdir(s_dir):
+            continue
+        try:
+            for root, _, files in os.walk(s_dir):
+                depth = root[len(s_dir):].count(os.sep)
+                if depth > 2:
+                    continue
+                for f in files:
+                    if f.lower().endswith(".pdf") and f.lower() not in seen_names:
+                        seen_names.add(f.lower())
+                        folder_name = "Downloads" if "download" in root.lower() else ("Documents" if "document" in root.lower() else os.path.basename(root))
+                        clean_title = re.sub(r"\.pdf$", "", f, flags=re.IGNORECASE).replace("_", " ").replace("-", " ")
+                        results.append({
+                            "name": f,
+                            "clean_name": clean_title,
+                            "path": os.path.join(root, f),
+                            "folder": folder_name
+                        })
+                        if len(results) >= limit:
+                            return results
+        except Exception:
+            continue
+    return results
+
+
 def search_and_load_local_file(query: str) -> Dict[str, Any]:
     """Searches user filesystem for a PDF matching query keywords and loads it into memory."""
     query = str(query).strip().strip('"').strip("'")
@@ -1075,63 +1114,114 @@ async def voice_orchestrator(request: Request):
             "continue_listening": True,
         }
 
-    # 10. Voice-based File Search & Ingestion
+    # 10. Voice-based Guided File Upload & Ingestion
+    file_picker_triggers = ["open picker", "open file picker", "file picker", "browse", "select file manually", "choose file manually"]
+    if any(k in cleaned_command for k in file_picker_triggers):
+        picker_text = "Opening the document picker. Please select your study PDF document."
+        file_id = str(uuid.uuid4())
+        audio_filename = f"{file_id}.mp3"
+        audio_path = os.path.join(STATIC_DIR, audio_filename)
+        audio_url = None
+        if await generate_edge_tts_audio(text=picker_text, output_path=audio_path, language=language):
+            audio_url = build_resource_url(request, audio_filename)
+        return {
+            "status": "success",
+            "intent": "OPEN_FILE_PICKER",
+            "text": picker_text,
+            "spoken_text": picker_text,
+            "audio_url": audio_url,
+            "continue_listening": True,
+        }
+
     file_request_patterns = [
         "upload", "fetch file", "load file", "open file", "find file",
         "take document", "take the document", "take file", "take the file",
         "take ", "named as", "from my download", "from download", "from my document",
-        "from document", "from desktop", "load ", "fetch ", "get document", "get file"
+        "from document", "from desktop", "load ", "fetch ", "get document", "get file",
+        "how to upload", "how do i upload", "add file", "add document", "list files",
+        "list documents", "what files", "my documents", "which files"
     ]
     if any(k in cleaned_command for k in file_request_patterns):
         kw, folder_pref = extract_file_search_intent(cleaned_command)
-        query = kw if kw else cleaned_command
-        if len(query) >= 2 or folder_pref:
-            try:
-                load_res = search_and_load_local_file(cleaned_command)
-                success_text = load_res.get("spoken_text") or (
-                    f"Successfully loaded {load_res['document_name']} from your {load_res.get('folder_name', 'system')} folder. "
-                    f"It has {load_res['page_count']} pages and {load_res['paragraphs_count']} paragraphs. "
-                    f"What would you like to do? You can say: read my document, quick summary, detailed summary, exam notes, or ask any question."
-                )
-                file_id = str(uuid.uuid4())
-                audio_filename = f"{file_id}.mp3"
-                audio_path = os.path.join(STATIC_DIR, audio_filename)
-                audio_url = None
-                if await generate_edge_tts_audio(text=success_text, output_path=audio_path, language=language):
-                    audio_url = build_resource_url(request, audio_filename)
+        generic_tokens = {"upload", "document", "file", "pdf", "it", "something", "my", "a", "the", "please", "load", "open", "how", "to", "do", "i", ""}
+        is_generic_prompt = not kw or kw.lower().strip() in generic_tokens or len(kw.strip()) < 2
 
-                stored["last_spoken_text"] = success_text
-                return {
-                    "status": "success",
-                    "intent": "FETCH_FILE",
-                    "text": success_text,
-                    "spoken_text": success_text,
-                    "audio_url": audio_url,
-                    "document_name": load_res["document_name"],
-                    "continue_listening": True,
-                }
-            except Exception as e:
-                err_text = f"Could not find a file matching {query}. Please state the file name or location."
-                return {
-                    "status": "file_not_found",
-                    "intent": "PROMPT_FILE",
-                    "text": err_text,
-                    "spoken_text": err_text,
-                    "continue_listening": True,
-                }
-        else:
-            prompt_text = "Please state the file name or where it is saved on your system."
+        if is_generic_prompt:
+            # Conversational voice guidance: actively assist the user without typing
+            available_pdfs = get_available_user_pdfs(3)
+            if available_pdfs:
+                names_spoken = ", ".join([f"{p['clean_name']} in your {p['folder']}" for p in available_pdfs])
+                guide_text = (
+                    f"I can help you load a study document completely hands-free. "
+                    f"In your folders, I found: {names_spoken}. "
+                    f"You can simply say: 'Open {available_pdfs[0]['clean_name']}', or tell me any file name or folder on your computer. "
+                    f"Which document would you like to open?"
+                )
+            else:
+                guide_text = (
+                    "I am ready to load your study document. Please state the name of your PDF file or the folder where it is saved, "
+                    "such as 'take cryptography from my downloads folder', or say 'open file picker' to browse."
+                )
+
             file_id = str(uuid.uuid4())
             audio_filename = f"{file_id}.mp3"
             audio_path = os.path.join(STATIC_DIR, audio_filename)
             audio_url = None
-            if await generate_edge_tts_audio(text=prompt_text, output_path=audio_path, language=language):
+            if await generate_edge_tts_audio(text=guide_text, output_path=audio_path, language=language):
                 audio_url = build_resource_url(request, audio_filename)
             return {
                 "status": "prompt_file_path",
                 "intent": "PROMPT_FILE",
-                "text": prompt_text,
-                "spoken_text": prompt_text,
+                "text": guide_text,
+                "spoken_text": guide_text,
+                "audio_url": audio_url,
+                "continue_listening": True,
+            }
+
+        # Specific file keyword provided by the user
+        try:
+            load_res = search_and_load_local_file(cleaned_command)
+            success_text = load_res.get("spoken_text") or (
+                f"Successfully loaded {load_res['document_name']} from your {load_res.get('folder_name', 'system')} folder. "
+                f"It has {load_res['page_count']} pages and {load_res['paragraphs_count']} paragraphs. "
+                f"What would you like to do? You can say: read my document, quick summary, detailed summary, exam notes, or ask any question."
+            )
+            file_id = str(uuid.uuid4())
+            audio_filename = f"{file_id}.mp3"
+            audio_path = os.path.join(STATIC_DIR, audio_filename)
+            audio_url = None
+            if await generate_edge_tts_audio(text=success_text, output_path=audio_path, language=language):
+                audio_url = build_resource_url(request, audio_filename)
+
+            stored["last_spoken_text"] = success_text
+            return {
+                "status": "success",
+                "intent": "FETCH_FILE",
+                "text": success_text,
+                "spoken_text": success_text,
+                "audio_url": audio_url,
+                "document_name": load_res["document_name"],
+                "continue_listening": True,
+            }
+        except Exception:
+            available_pdfs = get_available_user_pdfs(2)
+            if available_pdfs:
+                sugg = " or ".join([p["clean_name"] for p in available_pdfs])
+                err_text = f"Could not find a document matching {kw}. In your downloads, I found {sugg}. Would you like to open one of these, or say 'open file picker'?"
+            else:
+                err_text = f"Could not find a document matching {kw}. Please state the file name or location again, or say 'open file picker' to browse."
+
+            file_id = str(uuid.uuid4())
+            audio_filename = f"{file_id}.mp3"
+            audio_path = os.path.join(STATIC_DIR, audio_filename)
+            audio_url = None
+            if await generate_edge_tts_audio(text=err_text, output_path=audio_path, language=language):
+                audio_url = build_resource_url(request, audio_filename)
+            return {
+                "status": "file_not_found",
+                "intent": "PROMPT_FILE",
+                "text": err_text,
+                "spoken_text": err_text,
                 "audio_url": audio_url,
                 "continue_listening": True,
             }
