@@ -16,6 +16,7 @@ import {
   ActivityIndicator,
   AccessibilityInfo,
   TextInput,
+  Image,
 } from "react-native";
 import * as DocumentPicker from "expo-document-picker";
 import * as Speech from "expo-speech";
@@ -26,6 +27,8 @@ import {
 import { useNavigation } from "@react-navigation/native";
 import { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import { RootStackParamList } from "../App";
+
+const OPTIC_LOGO = require("../assets/optic_ai_logo.jpg");
 
 // Current Wi-Fi IP of host PC: 192.168.1.39
 const DEFAULT_HOST = "192.168.1.39:8000";
@@ -105,6 +108,7 @@ const MainScreen = () => {
   const [textUrl, setTextUrl] = useState<string | null>(null);
   const [activeSound, setActiveSound] = useState<ExpoAudio.Sound | null>(null);
   const [isSpeaking, setIsSpeaking] = useState<boolean>(false);
+  const [greetingPlayed, setGreetingPlayed] = useState<boolean>(false);
 
   // Hands-free continuous listening state
   const [continuousListening, setContinuousListening] = useState<boolean>(true);
@@ -137,6 +141,7 @@ const MainScreen = () => {
   const isSpeakingRef = useRef<boolean>(false);
   const continuousListeningRef = useRef<boolean>(true);
   const hasWelcomedRef = useRef<boolean>(false);
+  const greetingPlayedRef = useRef<boolean>(false);
   const webRecognitionRef = useRef<any>(null);
   const restartTimerRef = useRef<any>(null);
   const speechDebounceTimerRef = useRef<any>(null);
@@ -204,45 +209,95 @@ const MainScreen = () => {
     }, 450);
   };
 
-  // Safe voice output with guaranteed single-voice sequencing
+  // Safe voice output with guaranteed single-voice sequencing & Chrome speech watchdog
   const speakVoiceFeedback = async (message: string) => {
     await stopAllAudio();
     isSpeakingRef.current = true;
     setIsSpeaking(true);
 
-    Speech.speak(message, {
-      language: LANGUAGE_LOCALES[selectedLanguage] || "en-US",
-      onDone: () => {
+    // Watchdog timer: Chrome speech synthesis occasionally stalls without firing onDone or onError.
+    // Reset state automatically after message duration to prevent locking the interface.
+    const wordCount = message.split(/\s+/).length;
+    const estimatedDurationMs = Math.max(3500, wordCount * 500);
+    const watchdog = setTimeout(() => {
+      if (isSpeakingRef.current) {
+        console.log("[Optic-AI Voice Watchdog] Resetting speech lock after safety timeout.");
         isSpeakingRef.current = false;
         setIsSpeaking(false);
         scheduleListeningResume();
-      },
-      onStopped: () => {
-        isSpeakingRef.current = false;
-        setIsSpeaking(false);
-      },
-      onError: () => {
-        isSpeakingRef.current = false;
-        setIsSpeaking(false);
-        scheduleListeningResume();
-      },
-    });
+      }
+    }, estimatedDurationMs);
+
+    try {
+      if (Platform.OS === "web" && typeof window !== "undefined" && window.speechSynthesis) {
+        window.speechSynthesis.cancel();
+      }
+
+      Speech.speak(message, {
+        language: LANGUAGE_LOCALES[selectedLanguage] || "en-US",
+        onDone: () => {
+          clearTimeout(watchdog);
+          isSpeakingRef.current = false;
+          setIsSpeaking(false);
+          scheduleListeningResume();
+        },
+        onStopped: () => {
+          clearTimeout(watchdog);
+          isSpeakingRef.current = false;
+          setIsSpeaking(false);
+        },
+        onError: (err) => {
+          clearTimeout(watchdog);
+          console.log("[Optic-AI Speech Error]:", err);
+          isSpeakingRef.current = false;
+          setIsSpeaking(false);
+          scheduleListeningResume();
+        },
+      });
+    } catch (e) {
+      clearTimeout(watchdog);
+      isSpeakingRef.current = false;
+      setIsSpeaking(false);
+      scheduleListeningResume();
+    }
     console.log(`[Optic-AI Voice Feedback]: ${message}`);
   };
 
-  // Startup Welcome Greeting: Welcomes user and immediately initiates hands-free listening loop
+  // Welcome Greeting Trigger: Welcomes user and immediately initiates hands-free listening loop
+  const playWelcomeGreeting = async () => {
+    setGreetingPlayed(true);
+    greetingPlayedRef.current = true;
+    hasWelcomedRef.current = true;
+
+    await stopAllAudio();
+    const welcome =
+      "Welcome to Optic AI. I am your hands-free voice assistant. Tell me the document you want to upload, or you can say: read my document, next paragraph, quick summary, detailed summary, exam notes, or ask any question. How can I help you today?";
+    setSummary(welcome);
+    setLastSpokenResponse(welcome);
+    await speakVoiceFeedback(welcome);
+  };
+
+  // Web First-Interaction Audio Unlocker: Browsers require a user click/touch/key to start audio
   useEffect(() => {
-    if (!hasWelcomedRef.current) {
-      hasWelcomedRef.current = true;
-      const welcomeTimer = setTimeout(async () => {
-        await stopAllAudio();
-        const welcome =
-          "Welcome to Optic AI. I am your hands-free voice assistant. Tell me the document you want to upload, or you can say: read my document, next paragraph, quick summary, detailed summary, exam notes, or ask any question. How can I help you today?";
-        setSummary(welcome);
-        setLastSpokenResponse(welcome);
-        await speakVoiceFeedback(welcome);
-      }, 1000);
-      return () => clearTimeout(welcomeTimer);
+    if (Platform.OS === "web" && typeof window !== "undefined") {
+      const handleFirstInteraction = () => {
+        if (!hasWelcomedRef.current) {
+          playWelcomeGreeting();
+        }
+        window.removeEventListener("click", handleFirstInteraction);
+        window.removeEventListener("keydown", handleFirstInteraction);
+        window.removeEventListener("touchstart", handleFirstInteraction);
+      };
+
+      window.addEventListener("click", handleFirstInteraction, { once: true });
+      window.addEventListener("keydown", handleFirstInteraction, { once: true });
+      window.addEventListener("touchstart", handleFirstInteraction, { once: true });
+
+      return () => {
+        window.removeEventListener("click", handleFirstInteraction);
+        window.removeEventListener("keydown", handleFirstInteraction);
+        window.removeEventListener("touchstart", handleFirstInteraction);
+      };
     }
   }, []);
 
@@ -791,7 +846,7 @@ const MainScreen = () => {
   };
 
   // Web Speech Recognition for Desktop Browsers (Chrome / Edge)
-  const startWebListening = () => {
+  const startWebListening = (force: boolean = false) => {
     if (typeof window === "undefined") return;
     const SpeechRecognition =
       (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
@@ -802,7 +857,9 @@ const MainScreen = () => {
       return;
     }
 
-    if (isSpeakingRef.current || activeSoundRef.current || isProcessingCommandRef.current) return;
+    if (!force && (isSpeakingRef.current || activeSoundRef.current || isProcessingCommandRef.current)) {
+      return;
+    }
 
     try {
       if (webRecognitionRef.current) {
@@ -822,13 +879,16 @@ const MainScreen = () => {
       };
 
       recognition.onresult = (event: any) => {
-        let fullTranscript = "";
-        for (let i = 0; i < event.results.length; i++) {
-          fullTranscript += event.results[i][0].transcript + " ";
+        let latestTranscript = "";
+        const startIndex = typeof event.resultIndex === "number" ? event.resultIndex : 0;
+        for (let i = startIndex; i < event.results.length; i++) {
+          if (event.results[i] && event.results[i][0]) {
+            latestTranscript += event.results[i][0].transcript + " ";
+          }
         }
-        fullTranscript = fullTranscript.trim();
-        if (fullTranscript) {
-          handleIncomingSpeech(fullTranscript);
+        latestTranscript = latestTranscript.trim();
+        if (latestTranscript) {
+          handleIncomingSpeech(latestTranscript);
         }
       };
 
@@ -889,6 +949,24 @@ const MainScreen = () => {
       speechAccumulatorRef.current = "";
       handleStopAll();
       return;
+    }
+
+    // Wake Word Immediate Detection ("Hey Optic", "Hey Optic AI", "Optic", "Hey Optics")
+    const WAKE_WORD_ONLY_REGEX = /^(hey|hi|hello|ok|okay)?\s*(optic\s*ai|optics\s*ai|optic\s*eye|optics|optic|optik)[,.!?\s]*$/i;
+    if (WAKE_WORD_ONLY_REGEX.test(lower)) {
+      console.log("[Optic-AI Wake Word Detected]: Instant acknowledgment");
+      setWakeWordHeard(true);
+      setTimeout(() => setWakeWordHeard(false), 3500);
+      if (speechDebounceTimerRef.current) clearTimeout(speechDebounceTimerRef.current);
+      speechAccumulatorRef.current = "";
+      processCommand("hey optic");
+      return;
+    }
+
+    const WAKE_WORD_PREFIX_REGEX = /^(hey|hi|hello|ok|okay)?\s*(optic\s*ai|optics\s*ai|optic\s*eye|optics|optic|optik)[,.!?\s]+/i;
+    if (WAKE_WORD_PREFIX_REGEX.test(lower)) {
+      setWakeWordHeard(true);
+      setTimeout(() => setWakeWordHeard(false), 3500);
     }
 
     // Accumulate the spoken statement and display live transcription
@@ -1142,17 +1220,22 @@ const MainScreen = () => {
     }
   };
 
-  const startListening = async () => {
-    if (isSpeakingRef.current || activeSoundRef.current || isProcessingCommandRef.current) {
+  const startListening = async (force: boolean = false) => {
+    if (!force && (isSpeakingRef.current || activeSoundRef.current || isProcessingCommandRef.current)) {
       return;
     }
 
     try {
-      await stopAllAudio();
+      if (force) {
+        await stopAllAudio();
+        isSpeakingRef.current = false;
+        isProcessingCommandRef.current = false;
+      }
+
       await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
 
       if (Platform.OS === "web") {
-        startWebListening();
+        startWebListening(force);
         return;
       }
 
@@ -1241,8 +1324,20 @@ const MainScreen = () => {
         accessibilityLabel="Top Navigation Bar"
       >
         <View style={styles.navBrandContainer}>
-          <Text style={styles.navLogo}>OPTIC</Text>
-          <Text style={styles.navLogoAI}>AI</Text>
+          <Image
+            source={OPTIC_LOGO}
+            style={styles.navLogoImage}
+            resizeMode="contain"
+            accessible={true}
+            accessibilityLabel="Optic AI Personalized Logo"
+          />
+          <View style={styles.navBrandTextGroup}>
+            <View style={styles.navBrandRow}>
+              <Text style={styles.navLogo}>OPTIC</Text>
+              <Text style={styles.navLogoAI}>AI</Text>
+            </View>
+            <Text style={styles.navTagline}>Advancing Vision Through Intelligence</Text>
+          </View>
           <View style={styles.navVoiceBadge}>
             <Text style={styles.navVoiceBadgeText}>Voice Agentic</Text>
           </View>
@@ -1437,6 +1532,17 @@ const MainScreen = () => {
             <View style={styles.tabContentBlock}>
               {/* Hero Presentation Header */}
               <View style={styles.heroSection}>
+                {/* Personalized Optic AI Logo Card */}
+                <View style={styles.heroLogoBanner}>
+                  <Image
+                    source={OPTIC_LOGO}
+                    style={styles.heroLogoImage}
+                    resizeMode="contain"
+                    accessible={true}
+                    accessibilityLabel="Optic AI - Advancing Vision Through Intelligence"
+                  />
+                </View>
+
                 <View style={styles.heroBadgeRow}>
                   <View style={styles.heroPill}>
                     <Text style={styles.heroPillText}>🎙️ 100% Hands-Free Voice Assistant</Text>
@@ -1489,13 +1595,17 @@ const MainScreen = () => {
                       styles.voiceMainButton,
                       isListening && styles.voiceMainButtonListening,
                     ]}
-                    onPress={() => {
+                    onPress={async () => {
                       if (isListening) {
-                        stopListening();
+                        await stopListening();
                       } else {
-                        setContinuousListening(true);
-                        continuousListeningRef.current = true;
-                        startListening();
+                        if (!greetingPlayed) {
+                          await playWelcomeGreeting();
+                        } else {
+                          setContinuousListening(true);
+                          continuousListeningRef.current = true;
+                          await startListening(true);
+                        }
                       }
                     }}
                     accessible={true}
@@ -1513,19 +1623,33 @@ const MainScreen = () => {
                       {isListening ? "Listening... (Tap to Pause)" : "Start Voice Assistant"}
                     </Text>
                     <Text style={styles.voiceMainButtonSubtext}>
-                      {isListening ? "Speak naturally. We wait 1.8s silence before answering." : "Say 'Hey Optic' anytime"}
+                      {isListening
+                        ? "Speak naturally. Say 'Hey Optic' anytime."
+                        : "Tap to activate hands-free voice assistant"}
                     </Text>
                   </TouchableOpacity>
 
-                  <TouchableOpacity
-                    style={styles.stopAudioButton}
-                    onPress={handleStopAll}
-                    accessible={true}
-                    accessibilityRole="button"
-                    accessibilityLabel="Instant priority stop: halts all speech and audio playback"
-                  >
-                    <Text style={styles.stopAudioButtonText}>⏹ Stop Speech</Text>
-                  </TouchableOpacity>
+                  <View style={styles.voiceAuxButtonsRow}>
+                    <TouchableOpacity
+                      style={styles.greetingButton}
+                      onPress={playWelcomeGreeting}
+                      accessible={true}
+                      accessibilityRole="button"
+                      accessibilityLabel="Play Optic AI Welcome Greeting"
+                    >
+                      <Text style={styles.greetingButtonText}>🔊 Play Greeting</Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={styles.stopAudioButton}
+                      onPress={handleStopAll}
+                      accessible={true}
+                      accessibilityRole="button"
+                      accessibilityLabel="Instant priority stop: halts all speech and audio playback"
+                    >
+                      <Text style={styles.stopAudioButtonText}>⏹ Stop Speech</Text>
+                    </TouchableOpacity>
+                  </View>
                 </View>
 
                 {/* Live Speech Feedback Stream */}
@@ -1881,6 +2005,15 @@ const MainScreen = () => {
           {activeTab === "agents" && (
             <View style={styles.tabContentBlock}>
               <View style={styles.sectionHeaderHero}>
+                <View style={styles.aboutLogoBanner}>
+                  <Image
+                    source={OPTIC_LOGO}
+                    style={styles.aboutLogoImage}
+                    resizeMode="contain"
+                    accessible={true}
+                    accessibilityLabel="Optic AI Agents Emblem"
+                  />
+                </View>
                 <View style={styles.heroPill}>
                   <Text style={styles.heroPillText}>🤖 Multi-Agent Architecture</Text>
                 </View>
@@ -2271,6 +2404,15 @@ const MainScreen = () => {
               </View>
 
               <View style={styles.aboutCard}>
+                <View style={styles.aboutLogoBanner}>
+                  <Image
+                    source={OPTIC_LOGO}
+                    style={styles.aboutLogoImage}
+                    resizeMode="contain"
+                    accessible={true}
+                    accessibilityLabel="Optic AI Personalized Logo"
+                  />
+                </View>
                 <Text style={styles.aboutCardTitle}>Our Purpose & Vision</Text>
                 <Text style={styles.aboutCardText}>
                   The world is full of knowledge, but access is unequal. Visually impaired students and researchers
@@ -2482,14 +2624,35 @@ const styles = StyleSheet.create({
     alignItems: "center",
     marginRight: 16,
   },
+  navLogoImage: {
+    width: 36,
+    height: 36,
+    borderRadius: 8,
+    marginRight: 10,
+    backgroundColor: "#1E2227",
+  },
+  navBrandTextGroup: {
+    marginRight: 10,
+  },
+  navBrandRow: {
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  navTagline: {
+    fontSize: 9,
+    color: "#D8C7A5",
+    fontWeight: "600",
+    letterSpacing: 0.3,
+    marginTop: 1,
+  },
   navLogo: {
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: "900",
     color: "#F8F8F5",
     letterSpacing: 1,
   },
   navLogoAI: {
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: "900",
     color: "#2563EB",
     letterSpacing: 1,
@@ -2500,7 +2663,7 @@ const styles = StyleSheet.create({
     paddingVertical: 3,
     paddingHorizontal: 7,
     borderRadius: 12,
-    marginLeft: 8,
+    marginLeft: 4,
     borderWidth: 1,
     borderColor: "rgba(37, 99, 235, 0.3)",
   },
@@ -2570,9 +2733,29 @@ const styles = StyleSheet.create({
 
   // Hero Section
   heroSection: {
-    paddingVertical: 24,
     alignItems: "center",
-    textAlign: "center",
+    paddingVertical: 18,
+    marginBottom: 10,
+  },
+  heroLogoBanner: {
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 16,
+    padding: 10,
+    backgroundColor: "#1E2227",
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "rgba(216, 199, 165, 0.35)",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    width: "100%",
+    maxWidth: 480,
+  },
+  heroLogoImage: {
+    width: "100%",
+    height: 120,
   },
   heroBadgeRow: {
     flexDirection: "row",
@@ -2730,17 +2913,39 @@ const styles = StyleSheet.create({
     marginTop: 3,
   },
   stopAudioButton: {
-    flex: 1,
     backgroundColor: "#252A30",
-    paddingVertical: 18,
-    paddingHorizontal: 12,
-    borderRadius: 12,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    borderRadius: 10,
     alignItems: "center",
+    justifyContent: "center",
     borderWidth: 1,
     borderColor: "rgba(216, 199, 165, 0.4)",
   },
   stopAudioButtonText: {
     color: "#D8C7A5",
+    fontSize: 13,
+    fontWeight: "bold",
+    textAlign: "center",
+  },
+  voiceAuxButtonsRow: {
+    flex: 1,
+    flexDirection: "column",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+  greetingButton: {
+    backgroundColor: "#343A40",
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+    borderColor: "#D8C7A5",
+  },
+  greetingButtonText: {
+    color: "#E8DDC8",
     fontSize: 13,
     fontWeight: "bold",
     textAlign: "center",
@@ -3360,6 +3565,21 @@ const styles = StyleSheet.create({
   },
 
   // Section 7: About Optic AI
+  aboutLogoBanner: {
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 16,
+    padding: 12,
+    backgroundColor: "#1E2227",
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "rgba(216, 199, 165, 0.25)",
+  },
+  aboutLogoImage: {
+    width: "100%",
+    maxWidth: 380,
+    height: 110,
+  },
   aboutCard: {
     backgroundColor: "#343A40",
     borderRadius: 14,

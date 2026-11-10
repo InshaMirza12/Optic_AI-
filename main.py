@@ -735,10 +735,11 @@ async def voice_orchestrator(request: Request):
     raw_lower = speech_text.lower().strip()
     print(f"\n[Optic-AI Voice Orchestrator] Incoming command: '{speech_text}'")
 
-    # 1. Clean Wake Words ('Hey Optic AI', 'Hey Optic', 'Optic AI', 'Optic')
-    cleaned_command = re.sub(r"^(hey\s+optic\s+ai|hey\s+optic|optic\s+ai|optic)[,\s]*", "", raw_lower).strip()
+    # 1. Clean Wake Words ('Hey Optic AI', 'Hey Optic', 'Optic AI', 'Optic', 'Hey Optics', etc.)
+    WAKE_PATTERN = r"^(hey|hi|hello|ok|okay)?\s*(optic\s*ai|optics\s*ai|optic\s*eye|optics|optic|optik)[,\s]*"
+    cleaned_command = re.sub(WAKE_PATTERN, "", raw_lower).strip()
 
-    # If the user solely said the wake word ("Hey Optic"), acknowledge and listen
+    # If the user solely said the wake word ("Hey Optic" / "Hey Optic AI"), acknowledge and listen
     if not cleaned_command:
         ack_text = "Yes, I am listening. How can I help you?"
         file_id = str(uuid.uuid4())
@@ -752,6 +753,35 @@ async def voice_orchestrator(request: Request):
             "intent": "WAKE_WORD",
             "text": ack_text,
             "spoken_text": ack_text,
+            "audio_url": audio_url,
+            "continue_listening": True,
+        }
+
+    # 1.5. Greeting & Welcome Introduction Intent
+    if (
+        cleaned_command in ["greeting", "hello", "hi", "hey", "welcome", "help", "start"]
+        or "welcome message" in cleaned_command
+        or "greeting message" in cleaned_command
+        or "introduce yourself" in cleaned_command
+        or "who are you" in cleaned_command
+    ):
+        welcome_text = (
+            "Welcome to Optic AI. I am your hands-free voice assistant. "
+            "Tell me the document you want to upload, or you can say: "
+            "read my document, next paragraph, quick summary, detailed summary, exam notes, or ask any question. "
+            "How can I help you today?"
+        )
+        file_id = str(uuid.uuid4())
+        audio_filename = f"{file_id}.mp3"
+        audio_path = os.path.join(STATIC_DIR, audio_filename)
+        audio_url = None
+        if await generate_edge_tts_audio(text=welcome_text, output_path=audio_path, language=language):
+            audio_url = build_resource_url(request, audio_filename)
+        return {
+            "status": "success",
+            "intent": "GREETING",
+            "text": welcome_text,
+            "spoken_text": welcome_text,
             "audio_url": audio_url,
             "continue_listening": True,
         }
