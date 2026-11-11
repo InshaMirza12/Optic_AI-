@@ -1170,9 +1170,9 @@ const MainScreen = () => {
     setLoading(true);
     setLoadingMessage(`Optic AI processing: "${command}"...`);
 
-    // Strict 25s timeout safeguard prevents any hanging
+    // 90s timeout safeguard allows full generation of extensive, in-depth summaries
     const abortCtrl = new AbortController();
-    const timeoutId = setTimeout(() => abortCtrl.abort(), 25000);
+    const timeoutId = setTimeout(() => abortCtrl.abort(), 90000);
 
     try {
       const cleanBase = serverUrl.trim().replace(/\/+$/, "");

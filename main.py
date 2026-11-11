@@ -1287,11 +1287,11 @@ async def voice_orchestrator(request: Request):
         crew = Crew(agents=[agent], tasks=[task], verbose=True)
         crew_output = await asyncio.wait_for(
             asyncio.to_thread(crew.kickoff, inputs=inputs),
-            timeout=35.0
+            timeout=90.0
         )
         result_text = crew_output.raw.strip()
     except asyncio.TimeoutError:
-        print(f"[Optic-AI Agent Timeout] Kickoff exceeded 35s.")
+        print(f"[Optic-AI Agent Timeout] Kickoff exceeded 90s.")
         result_text = "The analysis took longer than expected. Please ask for a quick summary or a more specific question."
     except Exception as e:
         print(f"[Agent Execution Error]: {e}")
